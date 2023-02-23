@@ -15,7 +15,23 @@ fn main() {
     if let Err(e) = parse_sector(&mut root, &Path::new(&args.image_path), 0) {
         eprintln!("Error parsing MBR: {}", e);
     }
-    if let Some(children) = root.children {
-        println!("Partition Tables({}): {:#?}", children.len(), children);
+    let node = root;
+    print_node(node, 1);
+    
+    // if let Some(children) = root.children {
+    //     println!("Partition Tables({}): {:#?}", children.len(), children);
+    // }
+}
+
+fn print_node(node: PartitionTableNode, mut depth: usize)  {
+    if let Some(partition_table) = node.partition_table {
+        //TODO: Print here
+        println!("Partition Table: {}", partition_table);
+    }
+    if let Some(children) = node.children {
+        depth += 1;
+        for child in children {
+            print_node(child, depth);
+        }
     }
 }
