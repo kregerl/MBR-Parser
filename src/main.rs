@@ -16,6 +16,8 @@ fn main() {
         eprintln!("Error parsing MBR: {}", e);
     }
     let node = root;
+    println!("Bootable    LBA Start(Starting CHS)    # of Sectors(Ending CHS)");
+    println!("---------------------------------------------------------------");
     print_node(node, 1);
     
     // if let Some(children) = root.children {

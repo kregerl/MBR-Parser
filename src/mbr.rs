@@ -56,20 +56,54 @@ impl PartitionTable {
 
 impl Display for PartitionTable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Bootable: {}\n", self.bootable)?;
-        // write!(f, "Starting CHS: {:#?}\n", self.starting_chs)?;
-        write!(f, "Starting:\n")?;
-        write!(f," Cylinder: {}\n",PartitionTable::chs_cylinder(self.starting_chs))?;
-        write!(f," Head: {}\n",PartitionTable::chs_head(self.starting_chs))?;
-        write!(f," Sector: {}\n",PartitionTable::chs_sector(self.starting_chs))?;
-        write!(f, "Partition Type: {}\n", self.partition_type)?;
-        // write!(f, "Ending CHS: {:#?}\n", self.ending_chs)?;
-        write!(f, "Ending:\n")?;
-        write!(f," Cylinder: {}\n",PartitionTable::chs_cylinder(self.ending_chs))?;
-        write!(f, " Head: {}\n", PartitionTable::chs_head(self.ending_chs))?;
-        write!(f," Sector: {}\n",PartitionTable::chs_sector(self.ending_chs))?;
-        write!(f, "Starting LBA: {}\n", self.lba_start())?;
-        write!(f, "LBA # of Sectors: {}\n", self.num_sectors())
+        write!(
+            f,
+            "{}    {}({}, {}, {})    {}({}, {}, {})",
+            self.bootable,
+            self.lba_start(),
+            PartitionTable::chs_cylinder(self.starting_chs),
+            PartitionTable::chs_head(self.starting_chs),
+            PartitionTable::chs_sector(self.starting_chs),
+            self.num_sectors(),
+            PartitionTable::chs_cylinder(self.ending_chs),
+            PartitionTable::chs_head(self.ending_chs),
+            PartitionTable::chs_sector(self.ending_chs)
+        )
+
+        // write!(f, "Bootable: {}\n", self.bootable)?;
+        // // write!(f, "Starting CHS: {:#?}\n", self.starting_chs)?;
+        // write!(f, "Starting:\n")?;
+        // write!(
+        //     f,
+        //     " Cylinder: {}\n",
+        //     PartitionTable::chs_cylinder(self.starting_chs)
+        // )?;
+        // write!(
+        //     f,
+        //     " Head: {}\n",
+        //     PartitionTable::chs_head(self.starting_chs)
+        // )?;
+        // write!(
+        //     f,
+        //     " Sector: {}\n",
+        //     PartitionTable::chs_sector(self.starting_chs)
+        // )?;
+        // write!(f, "Partition Type: {}\n", self.partition_type)?;
+        // // write!(f, "Ending CHS: {:#?}\n", self.ending_chs)?;
+        // write!(f, "Ending:\n")?;
+        // write!(
+        //     f,
+        //     " Cylinder: {}\n",
+        //     PartitionTable::chs_cylinder(self.ending_chs)
+        // )?;
+        // write!(f, " Head: {}\n", PartitionTable::chs_head(self.ending_chs))?;
+        // write!(
+        //     f,
+        //     " Sector: {}\n",
+        //     PartitionTable::chs_sector(self.ending_chs)
+        // )?;
+        // write!(f, "Starting LBA: {}\n", self.lba_start())?;
+        // write!(f, "LBA # of Sectors: {}\n", self.num_sectors())
     }
 }
 
@@ -104,7 +138,7 @@ impl ByteStream {
         Ok(buffer)
     }
 
-    /// Get the next T from bytes without advancing 
+    /// Get the next T from bytes without advancing
     fn peek<T>(&mut self) -> io::Result<T> {
         self.read_impl(false)
     }
@@ -179,7 +213,7 @@ pub fn parse_sector(
     // Stop the sector at BOOT_SIGNATURE
     while stream.peek::<[u8; 2]>()? != BOOT_SIGNATURE {
         let peek_byte = stream.peek::<u8>()?;
-        // https://en.wikipedia.org/wiki/Master_boot_record#PTE: 
+        // https://en.wikipedia.org/wiki/Master_boot_record#PTE:
         // MBRs only accept 0x80, 0x00 means inactive, and 0x01–0x7F stand for invalid
         if peek_byte != 0x00 && peek_byte != 0x80 && (0x01..0x7F).contains(&peek_byte) {
             break;
