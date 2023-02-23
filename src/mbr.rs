@@ -56,18 +56,28 @@ impl PartitionTable {
 
 impl Display for PartitionTable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{}    {}({}, {}, {})    {}({}, {}, {})",
-            self.bootable,
-            self.lba_start(),
+        let start_chs = format!(
+            "(C:{}, H:{}, S:{})",
             PartitionTable::chs_cylinder(self.starting_chs),
             PartitionTable::chs_head(self.starting_chs),
-            PartitionTable::chs_sector(self.starting_chs),
-            self.num_sectors(),
+            PartitionTable::chs_sector(self.starting_chs)
+        );
+        let end_chs = format!(
+            "(C:{}, H:{}, S:{})",
             PartitionTable::chs_cylinder(self.ending_chs),
             PartitionTable::chs_head(self.ending_chs),
             PartitionTable::chs_sector(self.ending_chs)
+        );
+
+        write!(
+            f,
+            "| {:<10} | {:<12} | {:<22} | {:<12} | {:<22} | {:<12} | ",
+            self.bootable,
+            self.lba_start(),
+            start_chs,
+            self.lba_start() + self.num_sectors(),
+            end_chs,
+            self.num_sectors(),
         )
 
         // write!(f, "Bootable: {}\n", self.bootable)?;

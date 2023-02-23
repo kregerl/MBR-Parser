@@ -16,24 +16,24 @@ fn main() {
         eprintln!("Error parsing MBR: {}", e);
     }
     let node = root;
-    println!("Bootable    LBA Start(Starting CHS)    # of Sectors(Ending CHS)");
-    println!("---------------------------------------------------------------");
-    print_node(node, 1);
+    println!("| {:<10} | {:<12} | {:<22} | {:<12} | {:<22} | {:<12} |", "Bootable", "LBA Start", "Starting CHS", "LBA End", "Ending CHS", "# Sectors");
+    println!("{}", str::repeat("-", 109));
+    print_node(node);
     
     // if let Some(children) = root.children {
     //     println!("Partition Tables({}): {:#?}", children.len(), children);
     // }
 }
 
-fn print_node(node: PartitionTableNode, mut depth: usize)  {
+fn print_node(node: PartitionTableNode)  {
     if let Some(partition_table) = node.partition_table {
         //TODO: Print here
-        println!("Partition Table: {}", partition_table);
+        println!("{}", partition_table);
     }
     if let Some(children) = node.children {
-        depth += 1;
         for child in children {
-            print_node(child, depth);
+            print_node(child);
         }
+    } else {
     }
 }
