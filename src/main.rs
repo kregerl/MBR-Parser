@@ -7,6 +7,8 @@ mod mbr;
 #[derive(Debug, Parser)]
 struct Arguments {
     image_path: String,
+    #[arg(long)]
+    show_chs: bool,
 }
 
 fn main() {
@@ -19,16 +21,11 @@ fn main() {
     println!("| {:<10} | {:<12} | {:<22} | {:<12} | {:<22} | {:<12} |", "Bootable", "LBA Start", "Starting CHS", "LBA End", "Ending CHS", "# Sectors");
     println!("{}", str::repeat("-", 109));
     print_node(node);
-    
-    // if let Some(children) = root.children {
-    //     println!("Partition Tables({}): {:#?}", children.len(), children);
-    // }
 }
 
 fn print_node(node: PartitionTableNode)  {
     if let Some(partition_table) = node.partition_table {
-        //TODO: Print here
-        println!("{}", partition_table);
+        println!("{} -- {}", partition_table, partition_table.partition_type);
     }
     if let Some(children) = node.children {
         for child in children {

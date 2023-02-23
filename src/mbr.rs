@@ -17,7 +17,7 @@ const FIRST_TWO_BIT_MASK: u16 = 0b11000000;
 pub struct PartitionTable {
     bootable: u8,
     starting_chs: [u8; 3],
-    partition_type: u8,
+    pub partition_type: u8,
     ending_chs: [u8; 3],
     lba_start: [u8; 4],
     num_sectors: [u8; 4],
@@ -79,41 +79,6 @@ impl Display for PartitionTable {
             end_chs,
             self.num_sectors(),
         )
-
-        // write!(f, "Bootable: {}\n", self.bootable)?;
-        // // write!(f, "Starting CHS: {:#?}\n", self.starting_chs)?;
-        // write!(f, "Starting:\n")?;
-        // write!(
-        //     f,
-        //     " Cylinder: {}\n",
-        //     PartitionTable::chs_cylinder(self.starting_chs)
-        // )?;
-        // write!(
-        //     f,
-        //     " Head: {}\n",
-        //     PartitionTable::chs_head(self.starting_chs)
-        // )?;
-        // write!(
-        //     f,
-        //     " Sector: {}\n",
-        //     PartitionTable::chs_sector(self.starting_chs)
-        // )?;
-        // write!(f, "Partition Type: {}\n", self.partition_type)?;
-        // // write!(f, "Ending CHS: {:#?}\n", self.ending_chs)?;
-        // write!(f, "Ending:\n")?;
-        // write!(
-        //     f,
-        //     " Cylinder: {}\n",
-        //     PartitionTable::chs_cylinder(self.ending_chs)
-        // )?;
-        // write!(f, " Head: {}\n", PartitionTable::chs_head(self.ending_chs))?;
-        // write!(
-        //     f,
-        //     " Sector: {}\n",
-        //     PartitionTable::chs_sector(self.ending_chs)
-        // )?;
-        // write!(f, "Starting LBA: {}\n", self.lba_start())?;
-        // write!(f, "LBA # of Sectors: {}\n", self.num_sectors())
     }
 }
 
@@ -233,7 +198,7 @@ pub fn parse_sector(
         if table.is_empty() {
             break;
         }
-        // If table entry if an extended partition, follow it recusively
+        // If table entry is an extended partition, follow it recusively
         let node = if table.partition_type == 0x05 {
             let start = table.lba_start() as u64;
             let mut node = PartitionTableNode::new(table);
