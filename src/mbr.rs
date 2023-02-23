@@ -8,13 +8,13 @@ use std::{
 };
 
 const BOOTSTRAPER_LENGTH: usize = 446;
-const MBR_SIZE: usize = 512;
+const SECTOR_SIZE: usize = 512;
 const BOOT_SIGNATURE: [u8; 2] = [0x55, 0xAA];
 const CHS_SECTOR_BIT_SIZE: u8 = 6;
 const FIRST_TWO_BIT_MASK: u16 = 0b11000000;
 
 #[derive(Debug)]
-struct PartitionTable {
+pub struct PartitionTable {
     bootable: u8,
     starting_chs: [u8; 3],
     partition_type: u8,
@@ -59,35 +59,15 @@ impl Display for PartitionTable {
         write!(f, "Bootable: {}\n", self.bootable)?;
         // write!(f, "Starting CHS: {:#?}\n", self.starting_chs)?;
         write!(f, "Starting:\n")?;
-        write!(
-            f,
-            " Cylinder: {}\n",
-            PartitionTable::chs_cylinder(self.starting_chs)
-        )?;
-        write!(
-            f,
-            " Head: {}\n",
-            PartitionTable::chs_head(self.starting_chs)
-        )?;
-        write!(
-            f,
-            " Sector: {}\n",
-            PartitionTable::chs_sector(self.starting_chs)
-        )?;
+        write!(f," Cylinder: {}\n",PartitionTable::chs_cylinder(self.starting_chs))?;
+        write!(f," Head: {}\n",PartitionTable::chs_head(self.starting_chs))?;
+        write!(f," Sector: {}\n",PartitionTable::chs_sector(self.starting_chs))?;
         write!(f, "Partition Type: {}\n", self.partition_type)?;
         // write!(f, "Ending CHS: {:#?}\n", self.ending_chs)?;
         write!(f, "Ending:\n")?;
-        write!(
-            f,
-            " Cylinder: {}\n",
-            PartitionTable::chs_cylinder(self.ending_chs)
-        )?;
+        write!(f," Cylinder: {}\n",PartitionTable::chs_cylinder(self.ending_chs))?;
         write!(f, " Head: {}\n", PartitionTable::chs_head(self.ending_chs))?;
-        write!(
-            f,
-            " Sector: {}\n",
-            PartitionTable::chs_sector(self.ending_chs)
-        )?;
+        write!(f," Sector: {}\n",PartitionTable::chs_sector(self.ending_chs))?;
         write!(f, "Starting LBA: {}\n", self.lba_start())?;
         write!(f, "LBA # of Sectors: {}\n", self.num_sectors())
     }
@@ -99,30 +79,42 @@ struct ByteStream {
 }
 
 impl ByteStream {
-    fn new(path: &Path) -> io::Result<Self> {
+    /// `Path` to file to read a sector(512 bytes starting at `starting_index`) starting from `image_offset_sectors`
+    fn new(
+        path: &Path,
+        starting_index: Option<usize>,
+        image_offest_sectors: u64,
+    ) -> io::Result<Self> {
         Ok(Self {
-            bytes: Cursor::new(Self::read_disk_image(path, 0)?),
-            index: BOOTSTRAPER_LENGTH as usize,
+            bytes: Cursor::new(Self::read_disk_image(path, image_offest_sectors)?),
+            index: if let Some(index) = starting_index {
+                index
+            } else {
+                0
+            },
         })
     }
 
     /// Reads the first sector from an image (little-endian)
     fn read_disk_image(image_path: &Path, start_sector: u64) -> io::Result<Vec<u8>> {
         let mut image_file = File::open(image_path)?;
-        let mut buffer = vec![0u8; MBR_SIZE];
-        image_file.seek(SeekFrom::Start(start_sector))?;
+        let mut buffer = vec![0u8; SECTOR_SIZE];
+        image_file.seek(SeekFrom::Start(start_sector * SECTOR_SIZE as u64))?;
         image_file.read_exact(&mut buffer)?;
         Ok(buffer)
     }
 
+    /// Get the next T from bytes without advancing 
     fn peek<T>(&mut self) -> io::Result<T> {
         self.read_impl(false)
     }
 
+    /// Advance and get the next T from bytes  
     fn read<T>(&mut self) -> io::Result<T> {
         self.read_impl(true)
     }
 
+    /// Internal read to share code with `read` and `peek`
     fn read_impl<T>(&mut self, increment: bool) -> io::Result<T> {
         let num_bytes = mem::size_of::<T>();
         unsafe {
@@ -149,25 +141,64 @@ impl ByteStream {
             }
         }
     }
+}
 
-    fn jump_to(&mut self, index: u32) {
-        self.bytes.set_position(index as u64);
+#[derive(Debug, Default)]
+pub struct PartitionTableNode {
+    pub partition_table: Option<PartitionTable>,
+    pub children: Option<Vec<PartitionTableNode>>,
+}
+
+impl PartitionTableNode {
+    fn new(partition_table: PartitionTable) -> Self {
+        Self {
+            partition_table: Some(partition_table),
+            children: None,
+        }
+    }
+
+    pub fn add_child_node(&mut self, partition_table_node: PartitionTableNode) {
+        match &mut self.children {
+            Some(children) => children.push(partition_table_node),
+            None => self.children = Some(vec![partition_table_node]),
+        }
     }
 }
 
-/// Parse the MBR
-pub fn parse_mbr(path: &Path) -> io::Result<()> {
-    let mut stream = ByteStream::new(path)?;
+pub fn parse_sector(
+    parent: &mut PartitionTableNode,
+    path: &Path,
+    image_offset_sectors: u64,
+) -> io::Result<()> {
+    let mut stream = ByteStream::new(
+        path,
+        Some(BOOTSTRAPER_LENGTH as usize),
+        image_offset_sectors,
+    )?;
 
+    // Stop the sector at BOOT_SIGNATURE
     while stream.peek::<[u8; 2]>()? != BOOT_SIGNATURE {
-        println!("--------------------------");
-        let table = stream.read::<PartitionTable>()?;
-        println!("Partition Table: {}", table);
-        if table.partition_type == 0x05 {
-            // stream.jump_to(table.lba_start());
-            // let byte = stream.read::<[u8; 16]>()?;
-            // eprintln!("Here: {:#?}", byte);
+        let peek_byte = stream.peek::<u8>()?;
+        // https://en.wikipedia.org/wiki/Master_boot_record#PTE: 
+        // MBRs only accept 0x80, 0x00 means inactive, and 0x01–0x7F stand for invalid
+        if peek_byte != 0x00 && peek_byte != 0x80 && (0x01..0x7F).contains(&peek_byte) {
+            break;
         }
+        // Read table and discard zero'd out entries
+        let table = stream.read::<PartitionTable>()?;
+        if table.is_empty() {
+            break;
+        }
+        // If table entry if an extended partition, follow it recusively
+        let node = if table.partition_type == 0x05 {
+            let start = table.lba_start() as u64;
+            let mut node = PartitionTableNode::new(table);
+            parse_sector(&mut node, path, start)?;
+            node
+        } else {
+            PartitionTableNode::new(table)
+        };
+        parent.add_child_node(node);
     }
     Ok(())
 }
