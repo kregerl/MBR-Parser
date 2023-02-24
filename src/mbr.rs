@@ -1,11 +1,12 @@
 use std::{
-    fmt::Display,
     fs::File,
     io::{self, Cursor, Read, Seek, SeekFrom},
     mem::{self, MaybeUninit},
     path::Path,
     slice,
 };
+
+use prettytable::{row, Row, Table};
 
 const BOOTSTRAPER_LENGTH: usize = 446;
 const SECTOR_SIZE: usize = 512;
@@ -33,16 +34,69 @@ impl PartitionTableEntry {
             && self.num_sectors.iter().all(|byte| *byte == 0)
     }
 
-    pub fn is_extended_partition(&self) -> bool {
-        self.partition_type == 0x05
+    fn is_extended_partition(&self) -> bool {
+        self.partition_type == 0x05 || self.partition_type == 0x0F
     }
 
-    fn lba_start(&self) -> u32 {
+    fn starting_lba(&self) -> u32 {
         u32::from_le_bytes(self.lba_start)
     }
 
     fn num_sectors(&self) -> u32 {
         u32::from_le_bytes(self.num_sectors)
+    }
+
+    fn table_row(&self, image_offset_sectors: u64, show_chs: bool) -> Row {
+        let partition_table_starting_lba = image_offset_sectors + self.starting_lba() as u64;
+        let size = self.num_sectors() as u64;
+        if show_chs {
+            let starting_chs = self.parse_starting_chs();
+            let ending_chs = self.parse_ending_chs();
+            row![
+                if self.bootable == 0x80 { "Yes" } else { "No" },
+                partition_table_starting_lba,
+                format!(
+                    "({}, {}, {})",
+                    starting_chs.0, starting_chs.1, starting_chs.2
+                ),
+                partition_table_starting_lba + size,
+                format!("({}, {}, {})", ending_chs.0, ending_chs.1, ending_chs.2),
+                size,
+                format!(
+                    "{:#04x} :: {}",
+                    self.partition_type,
+                    lookup_partition_type(self.partition_type)
+                ),
+            ]
+        } else {
+            row![
+                if self.bootable == 0x80 { "Yes" } else { "No" },
+                partition_table_starting_lba,
+                partition_table_starting_lba + size,
+                size,
+                format!(
+                    "{:#04x} :: {}",
+                    self.partition_type,
+                    lookup_partition_type(self.partition_type)
+                ),
+            ]
+        }
+    }
+
+    fn parse_starting_chs(&self) -> (u16, u8, u8) {
+        (
+            Self::chs_cylinder(self.starting_chs),
+            Self::chs_head(self.starting_chs),
+            Self::chs_sector(self.starting_chs),
+        )
+    }
+
+    fn parse_ending_chs(&self) -> (u16, u8, u8) {
+        (
+            Self::chs_cylinder(self.ending_chs),
+            Self::chs_head(self.ending_chs),
+            Self::chs_sector(self.ending_chs),
+        )
     }
 
     fn chs_head(chs: [u8; 3]) -> u8 {
@@ -55,35 +109,6 @@ impl PartitionTableEntry {
 
     fn chs_cylinder(chs: [u8; 3]) -> u16 {
         ((chs[1] as u16 & FIRST_TWO_BIT_MASK) << 2) | (chs[2] as u16)
-    }
-}
-
-impl Display for PartitionTableEntry {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let start_chs = format!(
-            "(C:{}, H:{}, S:{})",
-            PartitionTableEntry::chs_cylinder(self.starting_chs),
-            PartitionTableEntry::chs_head(self.starting_chs),
-            PartitionTableEntry::chs_sector(self.starting_chs)
-        );
-        let end_chs = format!(
-            "(C:{}, H:{}, S:{})",
-            PartitionTableEntry::chs_cylinder(self.ending_chs),
-            PartitionTableEntry::chs_head(self.ending_chs),
-            PartitionTableEntry::chs_sector(self.ending_chs)
-        );
-
-        write!(
-            f,
-            "| {:<5} | {:<10} | {:<12} | {:<22} | {:<12} | {:<22} | {:<12} | ",
-            self.partition_type,
-            self.bootable,
-            self.lba_start(),
-            start_chs,
-            self.lba_start() + self.num_sectors(),
-            end_chs,
-            self.num_sectors(),
-        )
     }
 }
 
@@ -157,72 +182,54 @@ impl ByteStream {
     }
 }
 
-#[derive(Debug)]
-pub struct PartitionTableNode {
-    pub partition_table_entry: PartitionTableEntry,
-    pub children: Option<Vec<PartitionTableNode>>,
+/// Parse the entire mbr including extended partitions
+pub fn parse_mbr(path: &Path, show_chs: bool) {
+    let mut table = Table::new();
+    let row = if show_chs {
+        row![
+            "Bootable",
+            "LBA Starting Sector",
+            "Starting CHS",
+            "LBA Ending Sector",
+            "Ending CHS",
+            "Total Sectors",
+            "Partition Type"
+        ]
+    } else {
+        row![
+            "Bootable",
+            "LBA Starting Sector",
+            "LBA Ending Sector",
+            "Total Sectors",
+            "Partition Type"
+        ]
+    };
+    table.add_row(row);
+    parse_sector(&mut table, show_chs, path, true, 0, 0).unwrap();
+    table.printstd();
 }
-
-impl PartitionTableNode {
-    fn new(partition_table_entry: PartitionTableEntry) -> Self {
-        Self {
-            partition_table_entry: partition_table_entry,
-            children: None,
-        }
-    }
-
-    pub fn add_child_node(&mut self, partition_table_entry_node: PartitionTableNode) {
-        match &mut self.children {
-            Some(children) => children.push(partition_table_entry_node),
-            None => self.children = Some(vec![partition_table_entry_node]),
-        }
-    }
-
-    pub fn add_children(&mut self, partition_table_nodes: Vec<PartitionTableNode>) {
-        for node in partition_table_nodes {
-            self.add_child_node(node);
-        }
-    }
-}
-
-fn print_partition_table_entry(
-    partition_table_entry: &PartitionTableEntry,
-    image_offset_sectors: u64,
-) {
-    let start_lba = partition_table_entry.lba_start() as u64 + image_offset_sectors;
-    println!(
-        "| {:<4} | {:<4} | {:<12} | {:<12} | {:<12} | {} + {} = {}",
-        partition_table_entry.partition_type,
-        partition_table_entry.bootable,
-        start_lba,
-        start_lba + partition_table_entry.num_sectors() as u64 - 1,
-        partition_table_entry.num_sectors(),
-        image_offset_sectors,
-        partition_table_entry.lba_start(),
-        image_offset_sectors + partition_table_entry.lba_start() as u64
-    );
-}
-
-
-// TODO: switch this recursive function out for a simpler approach. First parse the 4 entry mbr and IF there is an EBR then we recursively follow
-// TODO: that EBR with the first_ebr_lba set to the first EBR's starting LBA. That way the next EBR's can be found using `first_ebr_lba + ebr.lba_start()`. 
-// TODO: first_ebr_lba should never be updated.
 
 /// first_ebr_lba :: The First extended block's Logical Block Address
-pub fn parse_sector(path: &Path, is_first: bool, image_offset_sectors: u64, first_ebr_lba: u64) -> io::Result<()> {
+fn parse_sector(
+    table: &mut Table,
+    show_chs: bool,
+    path: &Path,
+    is_first: bool,
+    image_offset_sectors: u64,
+    first_ebr_lba: u64,
+) -> io::Result<()> {
     let mut stream = ByteStream::new(
         path,
         Some(BOOTSTRAPER_LENGTH as usize),
         image_offset_sectors,
     )?;
 
-    // Stop the sector at BOOT_SIGNATURE
+    // Assume we are always in the right place and stop the sector at BOOT_SIGNATURE
     while stream.peek::<[u8; 2]>()? != BOOT_SIGNATURE {
         let peek_byte = stream.peek::<u8>()?;
         // https://en.wikipedia.org/wiki/Master_boot_record#PTE:
         // MBRs only accept 0x80, 0x00 means inactive, and 0x01–0x7F stand for invalid
         if peek_byte != 0x00 && peek_byte != 0x80 && (0x01..0x7F).contains(&peek_byte) {
-            eprintln!("Skipping... {}", peek_byte);
             break;
         }
         // Read table and discard zero'd out entries
@@ -232,16 +239,135 @@ pub fn parse_sector(path: &Path, is_first: bool, image_offset_sectors: u64, firs
         }
 
         if partition_table_entry.is_extended_partition() {
-            let start = partition_table_entry.lba_start() as u64;
+            // If the partition is an extended partition, then we will jump to the EBR and parse the partition table there
+            let start_lba = partition_table_entry.starting_lba() as u64;
             if is_first {
-                print_partition_table_entry(&partition_table_entry, image_offset_sectors);
-                parse_sector(path, true, start + image_offset_sectors, first_ebr_lba)?;
+                table.add_row(partition_table_entry.table_row(image_offset_sectors, show_chs));
+                // If this is the first extended partition table entry in the MBR, parse the next EBR at `start_lba` and set
+                // `first_ebr_lba` to the start of the first EBR since all following EBR's starting LBA's are relative to the first EBR's LBA
+                parse_sector(table, show_chs, path, false, start_lba, start_lba)?;
             } else {
-                parse_sector(path, true, start + image_offset_sectors, first_ebr_lba)?;
+                // If this is not the first extended partition table entry, parse the next EBR at `first_ebr_lba` + the `start_lba`
+                // (relative to the first EBR's LBA) of this partition table entry. Leave the first EBR's LBA unchanged.
+                parse_sector(
+                    table,
+                    show_chs,
+                    path,
+                    false,
+                    first_ebr_lba + start_lba,
+                    first_ebr_lba,
+                )?;
             }
         } else {
-            print_partition_table_entry(&partition_table_entry, image_offset_sectors);
+            table.add_row(partition_table_entry.table_row(image_offset_sectors, show_chs));
         }
     }
     Ok(())
+}
+
+fn lookup_partition_type(partition_type: u8) -> String {
+    match partition_type {
+        0x0 => "Empty",
+        0x1 => "FAT12",
+        0x2 => "XENIX root",
+        0x3 => "XENIX usr",
+        0x4 => "FAT16 <32M",
+        0x5 => "Extended",
+        0x6 => "FAT16",
+        0x7 => "HPFS/NTFS/exFAT",
+        0x8 => "AIX",
+        0x9 => "AIX bootable",
+        0xa => "OS/2 Boot Manag",
+        0xb => "W95 FAT32",
+        0xc => "W95 FAT32 (LBA)",
+        0xe => "W95 FAT16 (LBA)",
+        0xf => "W95 Ext'd (LBA)",
+        0x10 => "OPUS",
+        0x11 => "Hidden FAT12",
+        0x12 => "Compaq diagnost",
+        0x14 => "Hidden FAT16 <3",
+        0x16 => "Hidden FAT16",
+        0x17 => "Hidden HPFS/NTF",
+        0x18 => "AST SmartSleep",
+        0x1b => "Hidden W95 FAT3",
+        0x1c => "Hidden W95 FAT3",
+        0x1e => "Hidden W95 FAT1",
+        0x24 => "NEC DOS",
+        0x27 => "Hidden NTFS Win",
+        0x39 => "Plan 9",
+        0x3c => "PartitionMagic",
+        0x40 => "Venix 80286",
+        0x41 => "PPC PReP Boot",
+        0x42 => "SFS",
+        0x4d => "QNX4.x",
+        0x4e => "QNX4.x 2nd part",
+        0x4f => "QNX4.x 3rd part",
+        0x50 => "OnTrack DM",
+        0x51 => "OnTrack DM6 Aux",
+        0x52 => "CP/M",
+        0x53 => "OnTrack DM6 Aux",
+        0x54 => "OnTrackDM6",
+        0x55 => "EZ-Drive",
+        0x56 => "Golden Bow",
+        0x5c => "Priam Edisk",
+        0x61 => "SpeedStor",
+        0x63 => "GNU HURD or Sys",
+        0x64 => "Novell Netware",
+        0x65 => "Novell Netware",
+        0x70 => "DiskSecure Mult",
+        0x75 => "PC/IX",
+        0x80 => "Old Minix",
+        0x81 => "Minix / old Lin",
+        0x82 => "Linux swap / So",
+        0x83 => "Linux",
+        0x84 => "OS/2 hidden or",
+        0x85 => "Linux extended",
+        0x86 => "NTFS volume set",
+        0x87 => "NTFS volume set",
+        0x88 => "Linux plaintext",
+        0x8e => "Linux LVM",
+        0x93 => "Amoeba",
+        0x94 => "Amoeba BBT",
+        0x9f => "BSD/OS",
+        0xa0 => "IBM Thinkpad hi",
+        0xa5 => "FreeBSD",
+        0xa6 => "OpenBSD",
+        0xa7 => "NeXTSTEP",
+        0xa8 => "Darwin UFS",
+        0xa9 => "NetBSD",
+        0xab => "Darwin boot",
+        0xaf => "HFS / HFS+",
+        0xb7 => "BSDI fs",
+        0xb8 => "BSDI swap",
+        0xbb => "Boot Wizard hid",
+        0xbc => "Acronis FAT32 L",
+        0xbe => "Solaris boot",
+        0xbf => "Solaris",
+        0xc1 => "DRDOS/sec (FAT-",
+        0xc4 => "DRDOS/sec (FAT-",
+        0xc6 => "DRDOS/sec (FAT-",
+        0xc7 => "Syrinx",
+        0xda => "Non-FS data",
+        0xdb => "CP/M / CTOS / .",
+        0xde => "Dell Utility",
+        0xdf => "BootIt",
+        0xe1 => "DOS access",
+        0xe3 => "DOS R/O",
+        0xe4 => "SpeedStor",
+        0xea => "Rufus alignment",
+        0xeb => "BeOS fs",
+        0xee => "GPT",
+        0xef => "EFI (FAT-12/16/",
+        0xf0 => "Linux/PA-RISC b",
+        0xf1 => "SpeedStor",
+        0xf4 => "SpeedStor",
+        0xf2 => "DOS secondary",
+        0xfb => "VMware VMFS",
+        0xfc => "VMware VMKCORE",
+        0xfd => "Linux raid auto",
+        0xfe => "LANstep",
+        0xff => "BBT",
+        _ => "Unknown Partition Type",
+    }
+    .into()
 }

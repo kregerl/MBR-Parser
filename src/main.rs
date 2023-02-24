@@ -1,5 +1,5 @@
+use crate::mbr::parse_mbr;
 use clap::Parser;
-use mbr::{parse_sector};
 use std::path::Path;
 
 mod mbr;
@@ -13,7 +13,5 @@ struct Arguments {
 
 fn main() {
     let args = Arguments::parse();
-    println!("| {:<4} | {:<4} | {:<12} | {:<12} | {:<12} |", "PT", "BOOT", "START", "END", "SIZE");
-    println!("-------------------------------------------------------------");
-    parse_sector(&Path::new(&args.image_path), true, 0, 0).unwrap();
+    parse_mbr(&Path::new(&args.image_path), args.show_chs);
 }
