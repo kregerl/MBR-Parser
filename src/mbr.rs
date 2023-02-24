@@ -14,16 +14,16 @@ const CHS_SECTOR_BIT_SIZE: u8 = 6;
 const FIRST_TWO_BIT_MASK: u16 = 0b11000000;
 
 #[derive(Debug)]
-pub struct PartitionTable {
+pub struct PartitionTableEntry {
     bootable: u8,
     starting_chs: [u8; 3],
-    pub partition_type: u8,
+    partition_type: u8,
     ending_chs: [u8; 3],
     lba_start: [u8; 4],
     num_sectors: [u8; 4],
 }
 
-impl PartitionTable {
+impl PartitionTableEntry {
     fn is_empty(&self) -> bool {
         self.bootable == 0
             && self.starting_chs.iter().all(|byte| *byte == 0)
@@ -31,6 +31,10 @@ impl PartitionTable {
             && self.ending_chs.iter().all(|byte| *byte == 0)
             && self.lba_start.iter().all(|byte| *byte == 0)
             && self.num_sectors.iter().all(|byte| *byte == 0)
+    }
+
+    pub fn is_extended_partition(&self) -> bool {
+        self.partition_type == 0x05
     }
 
     fn lba_start(&self) -> u32 {
@@ -54,24 +58,25 @@ impl PartitionTable {
     }
 }
 
-impl Display for PartitionTable {
+impl Display for PartitionTableEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let start_chs = format!(
             "(C:{}, H:{}, S:{})",
-            PartitionTable::chs_cylinder(self.starting_chs),
-            PartitionTable::chs_head(self.starting_chs),
-            PartitionTable::chs_sector(self.starting_chs)
+            PartitionTableEntry::chs_cylinder(self.starting_chs),
+            PartitionTableEntry::chs_head(self.starting_chs),
+            PartitionTableEntry::chs_sector(self.starting_chs)
         );
         let end_chs = format!(
             "(C:{}, H:{}, S:{})",
-            PartitionTable::chs_cylinder(self.ending_chs),
-            PartitionTable::chs_head(self.ending_chs),
-            PartitionTable::chs_sector(self.ending_chs)
+            PartitionTableEntry::chs_cylinder(self.ending_chs),
+            PartitionTableEntry::chs_head(self.ending_chs),
+            PartitionTableEntry::chs_sector(self.ending_chs)
         );
 
         write!(
             f,
-            "| {:<10} | {:<12} | {:<22} | {:<12} | {:<22} | {:<12} | ",
+            "| {:<5} | {:<10} | {:<12} | {:<22} | {:<12} | {:<22} | {:<12} | ",
+            self.partition_type,
             self.bootable,
             self.lba_start(),
             start_chs,
@@ -152,33 +157,59 @@ impl ByteStream {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct PartitionTableNode {
-    pub partition_table: Option<PartitionTable>,
+    pub partition_table_entry: PartitionTableEntry,
     pub children: Option<Vec<PartitionTableNode>>,
 }
 
 impl PartitionTableNode {
-    fn new(partition_table: PartitionTable) -> Self {
+    fn new(partition_table_entry: PartitionTableEntry) -> Self {
         Self {
-            partition_table: Some(partition_table),
+            partition_table_entry: partition_table_entry,
             children: None,
         }
     }
 
-    pub fn add_child_node(&mut self, partition_table_node: PartitionTableNode) {
+    pub fn add_child_node(&mut self, partition_table_entry_node: PartitionTableNode) {
         match &mut self.children {
-            Some(children) => children.push(partition_table_node),
-            None => self.children = Some(vec![partition_table_node]),
+            Some(children) => children.push(partition_table_entry_node),
+            None => self.children = Some(vec![partition_table_entry_node]),
+        }
+    }
+
+    pub fn add_children(&mut self, partition_table_nodes: Vec<PartitionTableNode>) {
+        for node in partition_table_nodes {
+            self.add_child_node(node);
         }
     }
 }
 
-pub fn parse_sector(
-    parent: &mut PartitionTableNode,
-    path: &Path,
+fn print_partition_table_entry(
+    partition_table_entry: &PartitionTableEntry,
     image_offset_sectors: u64,
-) -> io::Result<()> {
+) {
+    let start_lba = partition_table_entry.lba_start() as u64 + image_offset_sectors;
+    println!(
+        "| {:<4} | {:<4} | {:<12} | {:<12} | {:<12} | {} + {} = {}",
+        partition_table_entry.partition_type,
+        partition_table_entry.bootable,
+        start_lba,
+        start_lba + partition_table_entry.num_sectors() as u64 - 1,
+        partition_table_entry.num_sectors(),
+        image_offset_sectors,
+        partition_table_entry.lba_start(),
+        image_offset_sectors + partition_table_entry.lba_start() as u64
+    );
+}
+
+
+// TODO: switch this recursive function out for a simpler approach. First parse the 4 entry mbr and IF there is an EBR then we recursively follow
+// TODO: that EBR with the first_ebr_lba set to the first EBR's starting LBA. That way the next EBR's can be found using `first_ebr_lba + ebr.lba_start()`. 
+// TODO: first_ebr_lba should never be updated.
+
+/// first_ebr_lba :: The First extended block's Logical Block Address
+pub fn parse_sector(path: &Path, is_first: bool, image_offset_sectors: u64, first_ebr_lba: u64) -> io::Result<()> {
     let mut stream = ByteStream::new(
         path,
         Some(BOOTSTRAPER_LENGTH as usize),
@@ -191,23 +222,26 @@ pub fn parse_sector(
         // https://en.wikipedia.org/wiki/Master_boot_record#PTE:
         // MBRs only accept 0x80, 0x00 means inactive, and 0x01–0x7F stand for invalid
         if peek_byte != 0x00 && peek_byte != 0x80 && (0x01..0x7F).contains(&peek_byte) {
+            eprintln!("Skipping... {}", peek_byte);
             break;
         }
         // Read table and discard zero'd out entries
-        let table = stream.read::<PartitionTable>()?;
-        if table.is_empty() {
+        let partition_table_entry = stream.read::<PartitionTableEntry>()?;
+        if partition_table_entry.is_empty() {
             break;
         }
-        // If table entry is an extended partition, follow it recusively
-        let node = if table.partition_type == 0x05 {
-            let start = table.lba_start() as u64;
-            let mut node = PartitionTableNode::new(table);
-            parse_sector(&mut node, path, start)?;
-            node
+
+        if partition_table_entry.is_extended_partition() {
+            let start = partition_table_entry.lba_start() as u64;
+            if is_first {
+                print_partition_table_entry(&partition_table_entry, image_offset_sectors);
+                parse_sector(path, true, start + image_offset_sectors, first_ebr_lba)?;
+            } else {
+                parse_sector(path, true, start + image_offset_sectors, first_ebr_lba)?;
+            }
         } else {
-            PartitionTableNode::new(table)
-        };
-        parent.add_child_node(node);
+            print_partition_table_entry(&partition_table_entry, image_offset_sectors);
+        }
     }
     Ok(())
 }
