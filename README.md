@@ -3,6 +3,7 @@ Small command line utility for printing the partition tables of a master boot re
 
 ## Example
 ```
+loucas:~$ mbr_parser mbr_test.dd
 +----------+---------------------+-------------------+---------------+-------------------------+
 | Bootable | LBA Starting Sector | LBA Ending Sector | Total Sectors | Partition Type          |
 +----------+---------------------+-------------------+---------------+-------------------------+
@@ -43,6 +44,7 @@ Where `<mbr_parser repo>` is the path to the cloned repo.
 
 Alternatively build the program with Cargo:
 ```
+git clone https://github.com/kregerl/mbr_parser.git
 cd mbr_parser
 cargo build --release
 ```
