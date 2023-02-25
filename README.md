@@ -48,7 +48,7 @@ Options:
 Install the [debian package](https://github.com/kregerl/parttable/releases/latest) or compile using cargo.
 
 Make sure you have [cargo](https://doc.rust-lang.org/cargo/getting-started/installation.html) installed, then clone this repo and install using the following command:  
-`cargo install --path <mbr_parser repo>`  
+`cargo install --path <parttable repo>`  
 Where `<parttable repo>` is the path to the cloned repo.  
 *NOTE: This will only install the program in ~/.cargo/bin for your user*
 
