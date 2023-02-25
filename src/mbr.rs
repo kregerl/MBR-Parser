@@ -1,21 +1,20 @@
 use std::{
-    fs::File,
-    io::{self, Cursor, Read, Seek, SeekFrom},
-    mem::{self, MaybeUninit},
+    io::{self},
     path::Path,
-    slice,
 };
 
 use prettytable::{row, Row, Table};
 
+use crate::bytestream::ByteStream;
+
 const BOOTSTRAPER_LENGTH: usize = 446;
-const SECTOR_SIZE: usize = 512;
-const BOOT_SIGNATURE: [u8; 2] = [0x55, 0xAA];
+// const BOOT_SIGNATURE: [u8; 2] = [0x55, 0xAA];
 const CHS_SECTOR_BIT_SIZE: u8 = 6;
 const FIRST_TWO_BIT_MASK: u16 = 0b11000000;
+pub const GPT_PARTITION_TYPE: u8 = 0xee;
 
 #[derive(Debug)]
-pub struct PartitionTableEntry {
+pub struct MbrPartitionTableEntry {
     bootable: u8,
     starting_chs: [u8; 3],
     partition_type: u8,
@@ -24,7 +23,7 @@ pub struct PartitionTableEntry {
     num_sectors: [u8; 4],
 }
 
-impl PartitionTableEntry {
+impl MbrPartitionTableEntry {
     fn is_empty(&self) -> bool {
         self.bootable == 0
             && self.starting_chs.iter().all(|byte| *byte == 0)
@@ -59,7 +58,7 @@ impl PartitionTableEntry {
                     "({}, {}, {})",
                     starting_chs.0, starting_chs.1, starting_chs.2
                 ),
-                partition_table_starting_lba + size,
+                partition_table_starting_lba + size - 1,
                 format!("({}, {}, {})", ending_chs.0, ending_chs.1, ending_chs.2),
                 size,
                 format!(
@@ -72,7 +71,7 @@ impl PartitionTableEntry {
             row![
                 if self.bootable == 0x80 { "Yes" } else { "No" },
                 partition_table_starting_lba,
-                partition_table_starting_lba + size,
+                partition_table_starting_lba + size - 1,
                 size,
                 format!(
                     "{:#04x} :: {}",
@@ -112,156 +111,140 @@ impl PartitionTableEntry {
     }
 }
 
-struct ByteStream {
-    bytes: Cursor<Vec<u8>>,
-    index: usize,
+#[derive(Debug, Default)]
+pub struct MbrPartitionTableEntryNode {
+    partition_table_entry: Option<MbrPartitionTableEntry>,
+    pub children: Option<Vec<MbrPartitionTableEntryNode>>,
+    image_offset_sectors: u64,
 }
 
-impl ByteStream {
-    /// `Path` to file to read a sector(512 bytes starting at `starting_index`) starting from `image_offset_sectors`
-    fn new(
-        path: &Path,
-        starting_index: Option<usize>,
-        image_offest_sectors: u64,
-    ) -> io::Result<Self> {
-        Ok(Self {
-            bytes: Cursor::new(Self::read_disk_image(path, image_offest_sectors)?),
-            index: if let Some(index) = starting_index {
-                index
-            } else {
-                0
-            },
-        })
+impl MbrPartitionTableEntryNode {
+    fn new(partition_table_entry: MbrPartitionTableEntry, image_offset_sectors: u64) -> Self {
+        Self {
+            partition_table_entry: Some(partition_table_entry),
+            children: None,
+            image_offset_sectors,
+        }
     }
 
-    /// Reads the first sector from an image (little-endian)
-    fn read_disk_image(image_path: &Path, start_sector: u64) -> io::Result<Vec<u8>> {
-        let mut image_file = File::open(image_path)?;
-        let mut buffer = vec![0u8; SECTOR_SIZE];
-        image_file.seek(SeekFrom::Start(start_sector * SECTOR_SIZE as u64))?;
-        image_file.read_exact(&mut buffer)?;
-        Ok(buffer)
+    fn add_child(&mut self, node: MbrPartitionTableEntryNode) {
+        match &mut self.children {
+            Some(children) => children.push(node),
+            None => self.children = Some(vec![node]),
+        }
     }
 
-    /// Get the next T from bytes without advancing
-    fn peek<T>(&mut self) -> io::Result<T> {
-        self.read_impl(false)
+    fn table_row(&self, show_chs: bool) -> Row {
+        if let Some(entry) = &self.partition_table_entry {
+            entry.table_row(self.image_offset_sectors, show_chs)
+        } else {
+            row![]
+        }
     }
 
-    /// Advance and get the next T from bytes  
-    fn read<T>(&mut self) -> io::Result<T> {
-        self.read_impl(true)
+    fn is_extended_partition(&self) -> bool {
+        if let Some(entry) = &self.partition_table_entry {
+            entry.is_extended_partition()
+        } else {
+            false
+        }
     }
 
-    /// Internal read to share code with `read` and `peek`
-    fn read_impl<T>(&mut self, increment: bool) -> io::Result<T> {
-        let num_bytes = mem::size_of::<T>();
-        unsafe {
-            // Allcoate memory for type T
-            let mut s = MaybeUninit::<T>::uninit().assume_init();
-            // Forms a writable slice from the pointer to the allocated struct and a size
-            let buffer = slice::from_raw_parts_mut(&mut s as *mut T as *mut u8, num_bytes);
-            // Offset bytes by `self.index`
-            self.bytes.set_position(self.index as u64);
-            // Read exactly enough bytes into `buffer`
-            match self.bytes.read_exact(buffer) {
-                Ok(()) => {
-                    // If success, increment index and return filled struct
-                    if increment {
-                        self.index += num_bytes;
+    pub fn is_gpt(&self) -> bool {
+        if let Some(children) = &self.children {
+            let gpt_partition = children
+                .iter()
+                .find(|child| {
+                    if child.partition_table_entry.is_none() {
+                        false
+                    } else {
+                        child.partition_table_entry.as_ref().unwrap().partition_type == GPT_PARTITION_TYPE
                     }
-                    Ok(s)
-                }
-                Err(e) => {
-                    // Deallocate the allocated memory on error
-                    ::std::mem::forget(s);
-                    Err(e)
-                }
+                });
+            match gpt_partition {
+                Some(_) => true,
+                None => false,
             }
+        } else {
+            false
         }
     }
 }
 
-/// Parse the entire mbr including extended partitions
-pub fn parse_mbr(path: &Path, show_chs: bool) {
-    let mut table = Table::new();
-    let row = if show_chs {
-        row![
-            "Bootable",
-            "LBA Starting Sector",
-            "Starting CHS",
-            "LBA Ending Sector",
-            "Ending CHS",
-            "Total Sectors",
-            "Partition Type"
-        ]
+fn print_nodes(
+    table: &mut Table,
+    node: MbrPartitionTableEntryNode,
+    show_chs: bool,
+    is_first: bool,
+) {
+    if let Some(children) = node.children {
+        for child_node in children {
+            if child_node.is_extended_partition() && is_first {
+                table.add_row(child_node.table_row(show_chs));
+            }
+            print_nodes(table, child_node, show_chs, false);
+        }
     } else {
-        row![
-            "Bootable",
-            "LBA Starting Sector",
-            "LBA Ending Sector",
-            "Total Sectors",
-            "Partition Type"
-        ]
-    };
-    table.add_row(row);
-    parse_sector(&mut table, show_chs, path, true, 0, 0).unwrap();
-    table.printstd();
+        table.add_row(node.table_row(show_chs));
+    }
 }
 
-/// first_ebr_lba :: The First extended block's Logical Block Address
 fn parse_sector(
-    table: &mut Table,
-    show_chs: bool,
+    node: &mut MbrPartitionTableEntryNode,
     path: &Path,
     is_first: bool,
-    image_offset_sectors: u64,
+    image_offset_sector: u64,
     first_ebr_lba: u64,
 ) -> io::Result<()> {
-    let mut stream = ByteStream::new(
-        path,
-        Some(BOOTSTRAPER_LENGTH as usize),
-        image_offset_sectors,
-    )?;
+    let mut stream = ByteStream::new(path, Some(BOOTSTRAPER_LENGTH as usize), image_offset_sector)?;
 
-    // Assume we are always in the right place and stop the sector at BOOT_SIGNATURE
-    while stream.peek::<[u8; 2]>()? != BOOT_SIGNATURE {
+    // Boot record can only have at max 4 entries.
+    for _ in 0..4 {
         let peek_byte = stream.peek::<u8>()?;
         // https://en.wikipedia.org/wiki/Master_boot_record#PTE:
         // MBRs only accept 0x80, 0x00 means inactive, and 0x01–0x7F stand for invalid
         if peek_byte != 0x00 && peek_byte != 0x80 && (0x01..0x7F).contains(&peek_byte) {
             break;
         }
-        // Read table and discard zero'd out entries
-        let partition_table_entry = stream.read::<PartitionTableEntry>()?;
+        // Read table and stop at zero'd out entries
+        let partition_table_entry = stream.read::<MbrPartitionTableEntry>()?;
         if partition_table_entry.is_empty() {
             break;
         }
 
-        if partition_table_entry.is_extended_partition() {
+        let next_node = if partition_table_entry.is_extended_partition() {
             // If the partition is an extended partition, then we will jump to the EBR and parse the partition table there
             let start_lba = partition_table_entry.starting_lba() as u64;
+            let mut next_node =
+                MbrPartitionTableEntryNode::new(partition_table_entry, image_offset_sector);
             if is_first {
-                table.add_row(partition_table_entry.table_row(image_offset_sectors, show_chs));
+                // table.add_row(partition_table_entry.table_row(image_offset_sectors, show_chs));
                 // If this is the first extended partition table entry in the MBR, parse the next EBR at `start_lba` and set
                 // `first_ebr_lba` to the start of the first EBR since all following EBR's starting LBA's are relative to the first EBR's LBA
-                parse_sector(table, show_chs, path, false, start_lba, start_lba)?;
+                parse_sector(&mut next_node, path, false, start_lba, start_lba)?;
             } else {
                 // If this is not the first extended partition table entry, parse the next EBR at `first_ebr_lba` + the `start_lba`
                 // (relative to the first EBR's LBA) of this partition table entry. Leave the first EBR's LBA unchanged.
                 parse_sector(
-                    table,
-                    show_chs,
+                    &mut next_node,
                     path,
                     false,
                     first_ebr_lba + start_lba,
                     first_ebr_lba,
                 )?;
             }
+            next_node
         } else {
-            table.add_row(partition_table_entry.table_row(image_offset_sectors, show_chs));
-        }
+            MbrPartitionTableEntryNode::new(partition_table_entry, image_offset_sector)
+        };
+        node.add_child(next_node);
     }
+    // if is_first {
+    //     if stream.read::<[u8; 2]>()? != BOOT_SIGNATURE {
+    //         eprintln!("Error reading disk image, no boot signature found");
+    //     }
+    // }
+
     Ok(())
 }
 
@@ -370,4 +353,36 @@ fn lookup_partition_type(partition_type: u8) -> String {
         _ => "Unknown Partition Type",
     }
     .into()
+}
+
+pub fn parse_mbr(path: &Path) -> MbrPartitionTableEntryNode {
+    let mut root = MbrPartitionTableEntryNode::default();
+    parse_sector(&mut root, path, true, 0, 0).unwrap();
+    root
+}
+
+pub fn display_mbr(root: MbrPartitionTableEntryNode, show_chs: bool) {
+    let mut table = Table::new();
+    let row = if show_chs {
+        row![
+            "Bootable",
+            "LBA Starting Sector",
+            "Starting CHS",
+            "LBA Ending Sector",
+            "Ending CHS",
+            "Total Sectors",
+            "Partition Type"
+        ]
+    } else {
+        row![
+            "Bootable",
+            "LBA Starting Sector",
+            "LBA Ending Sector",
+            "Total Sectors",
+            "Partition Type"
+        ]
+    };
+    table.add_row(row);
+    print_nodes(&mut table, root, show_chs, true);
+    table.printstd();
 }
