@@ -1,4 +1,4 @@
-# MBR Parser
+# Parttable
 Small command line utility for printing the partition tables of a master boot record.
 
 ## Example
