@@ -52,7 +52,14 @@ Make sure you have [cargo](https://doc.rust-lang.org/cargo/getting-started/insta
 Where `<parttable repo>` is the path to the cloned repo.  
 *NOTE: This will only install the program in ~/.cargo/bin for your user*
 
-Alternatively build the program with Cargo:
+Alternatively build or install the program with Cargo:
+```
+git clone https://github.com/kregerl/parttable.git
+cd parttable
+cargo install --path .
+parttable --help
+```
+
 ```
 git clone https://github.com/kregerl/parttable.git
 cd parttable
