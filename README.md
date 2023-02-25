@@ -3,7 +3,7 @@ Small command line utility for printing the partition tables of a master boot re
 
 ## Example
 ```
-loucas:~$ mbr_parser mbr_test.dd
+loucas:~$ parttable mbr_test.dd
 +----------+---------------------+-------------------+---------------+-------------------------+
 | Bootable | LBA Starting Sector | LBA Ending Sector | Total Sectors | Partition Type          |
 +----------+---------------------+-------------------+---------------+-------------------------+
@@ -21,11 +21,20 @@ loucas:~$ mbr_parser mbr_test.dd
 +----------+---------------------+-------------------+---------------+-------------------------+
 | No       | 1698304             | 2089472           | 391168        | 0x07 :: HPFS/NTFS/exFAT |
 +----------+---------------------+-------------------+---------------+-------------------------+
+
+loucas:~$ parttable gpt_test.dd
++---------------------+-------------------+---------------+------------+----------------------+
+| LBA Starting Sector | LBA Ending Sector | Total Sectors | Size (MB)  | Partition Type       |
++---------------------+-------------------+---------------+------------+----------------------+
+| 34                  | 32767             | 32734         | 16759808   | Microsoft reserved   |
++---------------------+-------------------+---------------+------------+----------------------+
+| 32768               | 2093055           | 2060288       | 1054867456 | Microsoft basic data |
++---------------------+-------------------+---------------+------------+----------------------+
 ```
 
 ## Usage 
 ```
-Usage: mbr_parser [OPTIONS] <IMAGE_PATH>
+Usage: parttable [OPTIONS] <IMAGE_PATH>
 
 Arguments:
   <IMAGE_PATH>  
@@ -36,16 +45,17 @@ Options:
 ```
 
 ## Install
-Prerequisite: [Cargo](https://doc.rust-lang.org/cargo/getting-started/installation.html)
+Install the [debian package](https://github.com/kregerl/parttable/releases/latest) or compile using cargo.
 
-Once cargo is installed, clone this repo and install using the following command:  
+Make sure you have [cargo](https://doc.rust-lang.org/cargo/getting-started/installation.html) installed, then clone this repo and install using the following command:  
 `cargo install --path <mbr_parser repo>`  
-Where `<mbr_parser repo>` is the path to the cloned repo.
+Where `<parttable repo>` is the path to the cloned repo.  
+*NOTE: This will only install the program in ~/.cargo/bin for your user*
 
 Alternatively build the program with Cargo:
 ```
-git clone https://github.com/kregerl/mbr_parser.git
-cd mbr_parser
+git clone https://github.com/kregerl/parttable.git
+cd parttable
 cargo build --release
+./target/release/parttable
 ```
- and run it from `mbr_parser/target/release/mbr_parser`

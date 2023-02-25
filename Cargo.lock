@@ -196,14 +196,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f051f77a7c8e6957c0696eac88f26b0117e54f52d3fc682ab19397a8812846a4"
 
 [[package]]
-name = "mbr_parser"
-version = "0.1.0"
-dependencies = [
- "clap",
- "prettytable-rs",
-]
-
-[[package]]
 name = "memchr"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -220,6 +212,14 @@ name = "os_str_bytes"
 version = "6.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b7820b9daea5457c9f21c69448905d723fbd21136ccf521748f23fd49e723ee"
+
+[[package]]
+name = "parttable"
+version = "1.0.0"
+dependencies = [
+ "clap",
+ "prettytable-rs",
+]
 
 [[package]]
 name = "prettytable-rs"

@@ -13,6 +13,15 @@ pub struct ByteStream {
     index: usize,
 }
 
+impl From<Vec<u8>> for ByteStream {
+    fn from(readable: Vec<u8>) -> Self {
+        Self {
+            bytes: Cursor::new(readable),
+            index: 0
+        }
+    }
+}
+
 impl ByteStream {
     /// `Path` to file to read a sector(512 bytes starting at `starting_index`) starting from `image_offset_sectors`
     pub fn new(
@@ -20,8 +29,10 @@ impl ByteStream {
         starting_index: Option<usize>,
         image_offest_sectors: u64,
     ) -> io::Result<Self> {
+
+        let start_sector = image_offest_sectors as usize;
         Ok(Self {
-            bytes: Cursor::new(Self::read_disk_image(path, image_offest_sectors)?),
+            bytes: Cursor::new(Self::read_disk_image(path, start_sector, start_sector + SECTOR_SIZE)?),
             index: if let Some(index) = starting_index {
                 index
             } else {
@@ -31,10 +42,10 @@ impl ByteStream {
     }
 
     /// Reads the first sector from an image (little-endian)
-    fn read_disk_image(image_path: &Path, start_sector: u64) -> io::Result<Vec<u8>> {
+    pub fn read_disk_image(image_path: &Path, from_sector: usize, to_sector: usize) -> io::Result<Vec<u8>> {
         let mut image_file = File::open(image_path)?;
-        let mut buffer = vec![0u8; SECTOR_SIZE];
-        image_file.seek(SeekFrom::Start(start_sector * SECTOR_SIZE as u64))?;
+        let mut buffer = vec![0u8; (to_sector - from_sector) * SECTOR_SIZE];
+        image_file.seek(SeekFrom::Start((from_sector * SECTOR_SIZE) as u64))?;
         image_file.read_exact(&mut buffer)?;
         Ok(buffer)
     }
@@ -50,10 +61,10 @@ impl ByteStream {
     }
 
     /// Read bytes into a vec starting at `index` until `index + amount`
-    pub fn read_raw_bytes(&mut self, amount: usize) -> Vec<u8> {
+    pub fn read_raw_bytes(&mut self, amount: usize) -> io::Result<Vec<u8>> {
         let mut buffer = vec![Default::default(); amount];
-        self.bytes.read_exact(&mut buffer);
-        buffer
+        self.bytes.read_exact(&mut buffer)?;
+        Ok(buffer)
     }
 
     /// Internal read to share code with `read` and `peek`

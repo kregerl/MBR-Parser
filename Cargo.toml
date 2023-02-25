@@ -1,10 +1,16 @@
 [package]
-name = "mbr_parser"
-version = "0.1.0"
+name = "parttable"
+version = "1.0.0"
 edition = "2021"
+authors =["Loucas K. <loucas.kreger@gmail.com>"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 clap = { version = "4.1.6", features = ["derive"] }
 prettytable-rs = "0.10.0"
+
+[package.metadata.deb]
+assets = [
+    ["target/release/parttable", "usr/bin/", "755"],
+]

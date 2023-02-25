@@ -239,11 +239,6 @@ fn parse_sector(
         };
         node.add_child(next_node);
     }
-    // if is_first {
-    //     if stream.read::<[u8; 2]>()? != BOOT_SIGNATURE {
-    //         eprintln!("Error reading disk image, no boot signature found");
-    //     }
-    // }
 
     Ok(())
 }
@@ -357,7 +352,9 @@ fn lookup_partition_type(partition_type: u8) -> String {
 
 pub fn parse_mbr(path: &Path) -> MbrPartitionTableEntryNode {
     let mut root = MbrPartitionTableEntryNode::default();
-    parse_sector(&mut root, path, true, 0, 0).unwrap();
+    if let Err(e) = parse_sector(&mut root, path, true, 0, 0) {
+        eprintln!("Error parsing MBR: {}", e);
+    }
     root
 }
 
