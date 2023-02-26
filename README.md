@@ -50,7 +50,7 @@ Install the [debian package](https://github.com/kregerl/parttable/releases/lates
 Make sure you have [cargo](https://doc.rust-lang.org/cargo/getting-started/installation.html) installed, then clone this repo and install using the following command:  
 `cargo install --path <parttable repo>`  
 Where `<parttable repo>` is the path to the cloned repo.  
-*NOTE: This will only install the program in ~/.cargo/bin for your user*
+*NOTE: This will only install the program for your user in ~/.cargo/bin*
 
 Alternatively build or install the program with Cargo:
 ```
