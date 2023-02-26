@@ -305,7 +305,7 @@ pub fn display_gpt(partition_table_entries: Vec<GptPartitionTableEntry>) {
             partition_table_entry.starting_lba(),
             partition_table_entry.ending_lba(),
             total_sectors,
-            total_sectors * SECTOR_SIZE as u64,
+            total_sectors * SECTOR_SIZE as u64 / 1000000,
             lookup_partition_type(partition_table_entry.partition_type_guid())
         ]);
     }
