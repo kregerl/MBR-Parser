@@ -350,12 +350,10 @@ fn lookup_partition_type(partition_type: u8) -> String {
     .into()
 }
 
-pub fn parse_mbr(path: &Path) -> MbrPartitionTableEntryNode {
+pub fn parse_mbr(path: &Path) -> io::Result<MbrPartitionTableEntryNode> {
     let mut root = MbrPartitionTableEntryNode::default();
-    if let Err(e) = parse_sector(&mut root, path, true, 0, 0) {
-        eprintln!("Error parsing MBR: {}", e);
-    }
-    root
+    parse_sector(&mut root, path, true, 0, 0)?;
+    Ok(root)
 }
 
 pub fn display_mbr(root: MbrPartitionTableEntryNode, show_chs: bool) {
