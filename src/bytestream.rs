@@ -41,6 +41,14 @@ impl ByteStream {
         })
     }
 
+    pub fn jump_to(&mut self, index: usize) {
+        self.index = index;
+    }
+
+    pub fn get_index(&self) -> usize {
+        self.index
+    }
+
     /// Reads the first sector from an image (little-endian)
     pub fn read_disk_image(image_path: &Path, from_sector: usize, to_sector: usize) -> io::Result<Vec<u8>> {
         let mut image_file = File::open(image_path)?;

@@ -1,7 +1,7 @@
 use crate::mbr::parse_mbr;
 use clap::Parser;
 use gpt::{display_gpt, parse_gpt};
-use mbr::display_mbr;
+use mbr::{display_mbr, parse_mft};
 use std::path::Path;
 
 mod bytestream;
@@ -13,6 +13,8 @@ struct Arguments {
     image_path: String,
     #[arg(long)]
     show_chs: bool,
+    #[arg(long)]
+    extract_mft: bool,
 }
 
 fn main() {
@@ -31,7 +33,13 @@ fn main() {
                     Err(e) => eprintln!("Error parsing GPT: {}", e),
                 }
             } else {
-                display_mbr(root, show_chs);
+                if args.extract_mft {
+                    let first_child = root.children.unwrap();
+                    let first_partition = first_child.get(0).unwrap();
+                    parse_mft(path, first_partition).unwrap();
+                } else {
+                    display_mbr(root, show_chs);
+                }
             }
         }
         Err(e) => eprintln!("Parse Error: {}", e),

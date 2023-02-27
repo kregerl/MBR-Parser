@@ -5,7 +5,7 @@ use std::{
 
 use prettytable::{row, Row, Table};
 
-use crate::bytestream::ByteStream;
+use crate::bytestream::{ByteStream, SECTOR_SIZE};
 
 const BOOTSTRAPER_LENGTH: usize = 446;
 // const BOOT_SIGNATURE: [u8; 2] = [0x55, 0xAA];
@@ -152,21 +152,28 @@ impl MbrPartitionTableEntryNode {
 
     pub fn is_gpt(&self) -> bool {
         if let Some(children) = &self.children {
-            let gpt_partition = children
-                .iter()
-                .find(|child| {
-                    if child.partition_table_entry.is_none() {
-                        false
-                    } else {
-                        child.partition_table_entry.as_ref().unwrap().partition_type == GPT_PARTITION_TYPE
-                    }
-                });
+            let gpt_partition = children.iter().find(|child| {
+                if child.partition_table_entry.is_none() {
+                    false
+                } else {
+                    child.partition_table_entry.as_ref().unwrap().partition_type
+                        == GPT_PARTITION_TYPE
+                }
+            });
             match gpt_partition {
                 Some(_) => true,
                 None => false,
             }
         } else {
             false
+        }
+    }
+
+    pub fn starting_lba(&self) -> u32 {
+        if let Some(entry) = &self.partition_table_entry {
+            entry.starting_lba()
+        } else {
+            0
         }
     }
 }
@@ -380,4 +387,125 @@ pub fn display_mbr(root: MbrPartitionTableEntryNode, show_chs: bool) {
     table.add_row(row);
     print_nodes(&mut table, root, show_chs, true);
     table.printstd();
+}
+
+struct PartitionBootRecord {
+    jump_instruction: [u8; 3],
+    oem_id: [u8; 8],
+    // BPB
+    bytes_per_sector: [u8; 2],
+    sectors_per_cluster: u8,
+    _error_space1: [u8; 7], // If the error space is not filled with 0's, then there is an error
+    device_type: u8,
+    _error_space2: [u8; 2], // If the error space is not filled with 0's, then there is an error
+    _reserved_space1: [u8; 8], // Zero filled space
+    _error_space3: [u8; 4], // If the error space is not filled with 0's, then there is an error
+    _reserved_space2: [u8; 4], // Zero filled space
+    number_of_sectors_in_volume: [u8; 8],
+    mft_lcn: [u8; 8], // Logical cluster number where the MFT starts.
+    backup_mft_lcn: [u8; 8],
+    // - If this value, when read in two’s complement, is positive, 
+    //   i.e. if its value goes from 00h to 7Fh (0000 0000 a 0111 1111), 
+    //   it actually designates the number of clusters per register
+    // - If this value, when read in two’s complement, is negative,
+    //   i.e. if its value goes from 80h to FFh (1000 0000 a 1111 1111), the 
+    //   size in bytes of each register will be equal to  2 to the power of the byte absolute value.
+    mft_size: u8,
+    _reserved_space3: [u8; 3],
+    number_of_clusters_per_index_buffer: u8,
+    _reserved_space4: [u8; 3],
+    serial_number: [u8; 8],
+}
+
+pub fn parse_mft(
+    path: &Path,
+    partition_table_entry: &MbrPartitionTableEntryNode,
+) -> io::Result<()> {
+    let starting_lba = partition_table_entry.starting_lba() as u64;
+    let mut stream = ByteStream::new(path, Some(0), starting_lba)?;
+    let pbr = stream.read::<PartitionBootRecord>()?;
+    
+    let mft_lba = starting_lba + u64::from_le_bytes(pbr.mft_lcn) * pbr.sectors_per_cluster as u64; 
+    let backup_mft_lba = starting_lba + u64::from_le_bytes(pbr.backup_mft_lcn) * pbr.sectors_per_cluster as u64;
+    println!("mft_lba: {:02x}", mft_lba * 512);
+    println!("mft_size: {}", pbr.mft_size);
+
+    parse_file_entry(path, mft_lba as usize)?;
+
+    Ok(())
+}
+
+#[derive(Debug)]
+struct MftHeader {
+    signature: [u8; 4],
+    offset_update_seq: [u8; 2],
+    size_offset_seq: [u8; 2],
+    log_file_seq_nr: [u8; 8],
+    use_del_count: [u8; 2],
+    hard_link_count: [u8; 2],
+    offset_of_first_attribute: [u8; 2],
+    flags: [u8; 2],
+    real_size_file_on_disk: [u8; 4],
+    space_allocated_for_file: [u8; 4],
+    reference_to_base_file: [u8; 8],
+    id_next_attribute: [u8; 2],
+    reserved: [u8; 2],
+    record_number: [u8; 4]
+}
+
+#[derive(Debug)]
+struct MftAttributeHeader {
+    attribute_type: [u8; 4],
+    length: [u8; 4],
+    non_resident_flag: u8,
+    name_length: u8,
+    offset_to_name: [u8; 2],
+    flags: [u8; 2],
+    attribute_id: [u8; 2],
+}
+
+#[derive(Debug)]
+struct ResidentAttributeHeader {
+    attribute_length: [u8; 4],
+    attribute_offset: [u8; 2],
+    indexed: u8,
+    unused: u8,
+}
+
+#[derive(Debug)]
+struct NonResidentAttributeHeader {
+    first_cluster: [u8; 8],
+    last_cluster:[u8; 8],
+    data_runs_offset: [u8; 2],
+    compression_unit: [u8; 2],
+    unused: [u8; 4],
+    attribute_allocated: [u8; 8],
+    attribute_size: [u8; 8],
+    stream_data_size: [u8; 8],
+}
+
+
+fn parse_file_entry(path: &Path, mft_lba: usize) -> io::Result<()> {
+    println!("mft_lba: {}", mft_lba);
+    let bytes = ByteStream::read_disk_image(path, mft_lba, mft_lba + 2)?;
+    let mut stream = ByteStream::from(bytes);
+
+    let entry = stream.read::<MftHeader>()?;
+    stream.jump_to(u16::from_le_bytes(entry.offset_of_first_attribute) as usize);
+    let mut header = stream.read::<MftAttributeHeader>()?;
+
+    println!("Start");
+    loop {
+        if u32::from_le_bytes(header.attribute_type) == 0x80 {
+            let nonresident_header = stream.read::<NonResidentAttributeHeader>()?;
+            println!("nonresident_header: {:#?}", nonresident_header);
+        } else if u32::from_le_bytes(header.attribute_type) == 0xFFFFFFFF {
+            break;
+        }
+        header = stream.read::<MftAttributeHeader>()?;
+    }
+
+    println!("Attribute header: {:#02x}", u32::from_le_bytes(header.attribute_type));
+
+    Ok(())
 }
