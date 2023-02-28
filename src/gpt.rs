@@ -1,14 +1,14 @@
 use std::{
     fmt::Display,
-    io::{self, Bytes, Read},
+    io::{self, Bytes, Read, BufReader},
     path::Path,
-    string::{FromUtf16Error, FromUtf8Error},
+    string::{FromUtf16Error, FromUtf8Error}, fs::File,
 };
 
 use byteorder::ReadBytesExt;
 use prettytable::{row, Table};
 
-use crate::bytestream::{self, ByteStream, Readable, SECTOR_SIZE};
+use crate::bytestream::{self, ByteStream, Readable, SECTOR_SIZE, interpret_bytes_as_utf16};
 
 // https://www.ietf.org/rfc/rfc4122.txt
 // 4.1.2.  Layout and Byte Order
@@ -48,12 +48,6 @@ impl Guid {
             clock_seq_low,
             node_identifier,
         }
-    }
-
-    fn from_reader(reader: &mut io::BufReader<std::fs::File>) -> io::Result<Self> {
-        let mut buffer = [0u8; 16];
-        reader.read_exact(&mut buffer)?;
-        Ok(Self::new(buffer))
     }
 }
 
@@ -111,74 +105,32 @@ struct GptHeader {
 }
 
 impl Readable for GptHeader {
-    fn read(reader: &mut io::BufReader<std::fs::File>) -> io::Result<Self>
+    fn read(reader: &mut ByteStream) -> io::Result<Self>
     where
         Self: Sized,
     {
         let mut efi_part_buffer = vec![0u8; 8];
-        reader.read_exact(&mut efi_part_buffer)?;
+        reader.get_reader().read_exact(&mut efi_part_buffer)?;
 
         let mut revision_buffer = [0u8; 4];
-        reader.read_exact(&mut revision_buffer)?;
+        reader.get_reader().read_exact(&mut revision_buffer)?;
         Ok(Self {
             efi_part: String::from_utf8(efi_part_buffer).unwrap(),
             revision: revision_buffer,
-            header_size: reader.read_u32::<byteorder::LittleEndian>()?,
-            crc32: reader.read_u32::<byteorder::LittleEndian>()?,
-            reserved: reader.read_u32::<byteorder::LittleEndian>()?,
-            current_lba: reader.read_u64::<byteorder::LittleEndian>()?,
-            backup_lba: reader.read_u64::<byteorder::LittleEndian>()?,
-            first_usable_lba: reader.read_u64::<byteorder::LittleEndian>()?,
-            last_usable_lba: reader.read_u64::<byteorder::LittleEndian>()?,
-            disk_guid: Guid::from_reader(reader)?,
-            starting_lba_of_partition_entries: reader.read_u64::<byteorder::LittleEndian>()?,
-            number_partition_entries: reader.read_u32::<byteorder::LittleEndian>()?,
-            size_single_partition_entry: reader.read_u32::<byteorder::LittleEndian>()?,
-            crc32_partition_entries: reader.read_u32::<byteorder::LittleEndian>()?,
+            header_size: reader.read()?,
+            crc32: reader.read()?,
+            reserved: reader.read()?,
+            current_lba: reader.read()?,
+            backup_lba: reader.read()?,
+            first_usable_lba: reader.read()?,
+            last_usable_lba: reader.read()?,
+            disk_guid: Guid::new(reader.read_byte_array::<16>()?),
+            starting_lba_of_partition_entries: reader.read()?,
+            number_partition_entries: reader.read()?,
+            size_single_partition_entry: reader.read()?,
+            crc32_partition_entries: reader.read()?,
         })
     }
-}
-
-impl GptHeader {
-    // fn signature(&self) -> Result<String, FromUtf8Error> {
-    //     String::from_utf8(self.efi_part.to_vec())
-    // }
-
-    // fn header_size(&self) -> u32 {
-    //     u32::from_le_bytes(self.header_size)
-    // }
-
-    // fn current_lba(&self) -> u64 {
-    //     u64::from_le_bytes(self.current_lba)
-    // }
-
-    // fn backup_lba(&self) -> u64 {
-    //     u64::from_le_bytes(self.backup_lba)
-    // }
-
-    // fn first_usable_lba(&self) -> u64 {
-    //     u64::from_le_bytes(self.first_usable_lba)
-    // }
-
-    // fn last_usable_lba(&self) -> u64 {
-    //     u64::from_le_bytes(self.last_usable_lba)
-    // }
-
-    // fn disk_guid(&self) -> Guid {
-    //     Guid::new(self.disk_guid)
-    // }
-
-    // fn starting_lba_of_partition_entries(&self) -> u64 {
-    //     u64::from_le_bytes(self.starting_lba_of_partition_entries)
-    // }
-
-    // fn number_partition_entries(&self) -> u32 {
-    //     u32::from_le_bytes(self.number_partition_entries)
-    // }
-
-    // fn size_single_partition_entry(&self) -> u32 {
-    //     u32::from_le_bytes(self.size_single_partition_entry)
-    // }
 }
 
 #[derive(Debug)]
@@ -192,18 +144,18 @@ pub struct GptPartitionTableEntry {
 }
 
 impl Readable for GptPartitionTableEntry {
-    fn read(reader: &mut io::BufReader<std::fs::File>) -> io::Result<Self>
+    fn read(reader: &mut ByteStream) -> io::Result<Self>
     where
         Self: Sized {
-        let partition_type_guid = Guid::from_reader(reader)?;
-        let unique_partition_guid= Guid::from_reader(reader)?;
-        let starting_lba= reader.read_u64::<byteorder::LittleEndian>()?;
-        let ending_lba= reader.read_u64::<byteorder::LittleEndian>()?;
+        let partition_type_guid = Guid::new(reader.read_byte_array::<16>()?);
+        let unique_partition_guid= Guid::new(reader.read_byte_array::<16>()?);
+        let starting_lba= reader.read()?;
+        let ending_lba= reader.read()?;
         let mut attribute_flag_buffer = [0u8; 8];
-        reader.read_exact(&mut attribute_flag_buffer)?;
+        reader.get_reader().read_exact(&mut attribute_flag_buffer)?;
 
         let mut partition_name_buffer = [0u8; 72];
-        reader.read_exact(&mut partition_name_buffer)?;
+        reader.get_reader().read_exact(&mut partition_name_buffer)?;
 
         Ok(Self {
             partition_type_guid,
@@ -224,44 +176,8 @@ impl GptPartitionTableEntry {
             && self.partition_name.iter().all(|byte| *byte == 0)
     }
 
-    // fn partition_type_guid(&self) -> Guid {
-    //     Guid::new(self.partition_type_guid)
-    // }
-
-    // fn unique_partition_guid(&self) -> Guid {
-    //     Guid::new(self.unique_partition_guid)
-    // }
-
-    // fn starting_lba(&self) -> u64 {
-    //     u64::from_le_bytes(self.starting_lba)
-    // }
-
-    // fn ending_lba(&self) -> u64 {
-    //     u64::from_le_bytes(self.ending_lba)
-    // }
-
     fn partition_name(&self) -> Result<String, FromUtf16Error> {
-        let num_bytes = self.partition_name.len();
-        let mut unicode_symbols: Vec<u16> = Vec::with_capacity(num_bytes / 2);
-        for index in (0..num_bytes).step_by(2) {
-            // Order of top and bottom here is reversed since the bytes are in little endian
-            let first = self.partition_name[index];
-            let second = self.partition_name[index + 1];
-            unicode_symbols.push(Self::bytes_to_u16(first, second));
-        }
-
-        String::from_utf16(&unicode_symbols)
-    }
-
-    fn bytes_to_u16(first: u8, second: u8) -> u16 {
-        #[cfg(target_endian = "little")]
-        {
-            ((second as u16) << 8) | first as u16
-        }
-        #[cfg(target_endian = "big")]
-        {
-            ((first as u16) << 8) | second as u16
-        }
+        interpret_bytes_as_utf16(&self.partition_name.to_vec())
     }
 }
 
@@ -325,7 +241,7 @@ pub fn parse_gpt(path: &Path) -> io::Result<Vec<GptPartitionTableEntry>> {
     let number_of_sectors =
         (header.number_partition_entries * header.size_single_partition_entry) / SECTOR_SIZE as u32;
 
-    let buffer = stream.read_raw_from_sectors(
+    let buffer = stream.read_raw_sectors(
         header.starting_lba_of_partition_entries as usize,
         number_of_sectors as usize,
     )?;
@@ -341,7 +257,6 @@ pub fn parse_gpt(path: &Path) -> io::Result<Vec<GptPartitionTableEntry>> {
 
         loop {
             let partition_table_entry = stream.read::<GptPartitionTableEntry>()?;
-            println!("HERE: {:#?} :: {}", partition_table_entry, partition_table_entry.is_empty());
             if partition_table_entry.is_empty() {
                 break 'outer;
             }

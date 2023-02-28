@@ -1,7 +1,7 @@
 use crate::mbr::parse_mbr;
 use clap::Parser;
 use gpt::{display_gpt, parse_gpt};
-use mbr::{display_mbr, parse_mft};
+use mbr::{display_mbr, parse_pbr};
 use std::path::Path;
 
 mod bytestream;
@@ -36,7 +36,7 @@ fn main() {
                 if args.extract_mft {
                     let first_child = root.children.unwrap();
                     let first_partition = first_child.get(0).unwrap();
-                    parse_mft(path, first_partition).unwrap();
+                    parse_pbr(path, first_partition).unwrap();
                 } else {
                     display_mbr(root, show_chs);
                 }
