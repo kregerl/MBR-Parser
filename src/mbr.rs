@@ -1,11 +1,12 @@
 use std::{
-    io::{self},
+    io::{self, BufRead},
     path::Path,
 };
 
+use byteorder::ReadBytesExt;
 use prettytable::{row, Row, Table};
 
-use crate::bytestream::{ByteStream, SECTOR_SIZE};
+use crate::bytestream::{ByteStream, SECTOR_SIZE, Readable};
 
 const BOOTSTRAPER_LENGTH: usize = 446;
 // const BOOT_SIGNATURE: [u8; 2] = [0x55, 0xAA];
@@ -19,8 +20,24 @@ pub struct MbrPartitionTableEntry {
     starting_chs: [u8; 3],
     partition_type: u8,
     ending_chs: [u8; 3],
-    lba_start: [u8; 4],
-    num_sectors: [u8; 4],
+    lba_start: u32,
+    num_sectors: u32,
+}
+
+impl Readable for MbrPartitionTableEntry {
+    fn read(reader: &mut io::BufReader<std::fs::File>) -> io::Result<Self>
+    where
+        Self: Sized {
+
+        Ok(Self {
+            bootable: reader.read_u8()?,
+            starting_chs: [reader.read_u8()?, reader.read_u8()?, reader.read_u8()?],
+            partition_type: reader.read_u8()?,
+            ending_chs: [reader.read_u8()?, reader.read_u8()?, reader.read_u8()?],
+            lba_start: reader.read_u32::<byteorder::LittleEndian>()?,
+            num_sectors: reader.read_u32::<byteorder::LittleEndian>()?,
+        })
+    }
 }
 
 impl MbrPartitionTableEntry {
@@ -29,8 +46,8 @@ impl MbrPartitionTableEntry {
             && self.starting_chs.iter().all(|byte| *byte == 0)
             && self.partition_type == 0
             && self.ending_chs.iter().all(|byte| *byte == 0)
-            && self.lba_start.iter().all(|byte| *byte == 0)
-            && self.num_sectors.iter().all(|byte| *byte == 0)
+            && self.lba_start == 0
+            && self.num_sectors == 0
     }
 
     fn is_extended_partition(&self) -> bool {
@@ -38,11 +55,11 @@ impl MbrPartitionTableEntry {
     }
 
     fn starting_lba(&self) -> u32 {
-        u32::from_le_bytes(self.lba_start)
+        self.lba_start
     }
 
     fn num_sectors(&self) -> u32 {
-        u32::from_le_bytes(self.num_sectors)
+        self.num_sectors
     }
 
     fn table_row(&self, image_offset_sectors: u64, show_chs: bool) -> Row {
@@ -203,19 +220,23 @@ fn parse_sector(
     image_offset_sector: u64,
     first_ebr_lba: u64,
 ) -> io::Result<()> {
-    let mut stream = ByteStream::new(path, Some(BOOTSTRAPER_LENGTH as usize), image_offset_sector)?;
+    // , Some(BOOTSTRAPER_LENGTH as usize), image_offset_sector
+    let mut stream = ByteStream::new(path)?;
+    let _ = stream.jump_to_byte((image_offset_sector * SECTOR_SIZE as u64) + BOOTSTRAPER_LENGTH as u64)?;
 
     // Boot record can only have at max 4 entries.
     for _ in 0..4 {
-        let peek_byte = stream.peek::<u8>()?;
-        // https://en.wikipedia.org/wiki/Master_boot_record#PTE:
-        // MBRs only accept 0x80, 0x00 means inactive, and 0x01–0x7F stand for invalid
-        if peek_byte != 0x00 && peek_byte != 0x80 && (0x01..0x7F).contains(&peek_byte) {
-            break;
-        }
+
         // Read table and stop at zero'd out entries
         let partition_table_entry = stream.read::<MbrPartitionTableEntry>()?;
         if partition_table_entry.is_empty() {
+            break;
+        }
+
+        // https://en.wikipedia.org/wiki/Master_boot_record#PTE:
+        // MBRs only accept 0x80, 0x00 means inactive, and 0x01–0x7F stand for invalid
+        let bootable = partition_table_entry.bootable;
+        if bootable != 0x00 && bootable != 0x80 && (0x01..0x7F).contains(&bootable) {
             break;
         }
 
@@ -421,16 +442,16 @@ pub fn parse_mft(
     path: &Path,
     partition_table_entry: &MbrPartitionTableEntryNode,
 ) -> io::Result<()> {
-    let starting_lba = partition_table_entry.starting_lba() as u64;
-    let mut stream = ByteStream::new(path, Some(0), starting_lba)?;
-    let pbr = stream.read::<PartitionBootRecord>()?;
+    // let starting_lba = partition_table_entry.starting_lba() as u64;
+    // let mut stream = ByteStream::new(path, Some(0), starting_lba)?;
+    // let pbr = stream.read::<PartitionBootRecord>()?;
     
-    let mft_lba = starting_lba + u64::from_le_bytes(pbr.mft_lcn) * pbr.sectors_per_cluster as u64; 
-    let backup_mft_lba = starting_lba + u64::from_le_bytes(pbr.backup_mft_lcn) * pbr.sectors_per_cluster as u64;
-    println!("mft_lba: {:02x}", mft_lba * 512);
-    println!("mft_size: {}", pbr.mft_size);
+    // let mft_lba = starting_lba + u64::from_le_bytes(pbr.mft_lcn) * pbr.sectors_per_cluster as u64; 
+    // let backup_mft_lba = starting_lba + u64::from_le_bytes(pbr.backup_mft_lcn) * pbr.sectors_per_cluster as u64;
+    // println!("mft_lba: {:02x}", mft_lba * 512);
+    // println!("mft_size: {}", pbr.mft_size);
 
-    parse_file_entry(path, mft_lba as usize)?;
+    // parse_file_entry(path, mft_lba as usize)?;
 
     Ok(())
 }
@@ -449,8 +470,8 @@ struct MftHeader {
     space_allocated_for_file: [u8; 4],
     reference_to_base_file: [u8; 8],
     id_next_attribute: [u8; 2],
-    reserved: [u8; 2],
-    record_number: [u8; 4]
+    update_seq_number: [u8; 2],
+    update_seq: [u8; 4]
 }
 
 #[derive(Debug)]
@@ -486,26 +507,38 @@ struct NonResidentAttributeHeader {
 
 
 fn parse_file_entry(path: &Path, mft_lba: usize) -> io::Result<()> {
-    println!("mft_lba: {}", mft_lba);
-    let bytes = ByteStream::read_disk_image(path, mft_lba, mft_lba + 2)?;
-    let mut stream = ByteStream::from(bytes);
+    // println!("mft_lba: {}", mft_lba);
+    // let bytes = ByteStream::read_disk_image(path, mft_lba, mft_lba + 2)?;
+    // let mut stream = ByteStream::from(bytes);
 
-    let entry = stream.read::<MftHeader>()?;
-    stream.jump_to(u16::from_le_bytes(entry.offset_of_first_attribute) as usize);
-    let mut header = stream.read::<MftAttributeHeader>()?;
+    // let entry = stream.read::<MftHeader>()?;
+    // println!("Entry: {:#?}", entry);
+    // println!("Offset: {}", u16::from_le_bytes(entry.offset_of_first_attribute) as usize);
+    // // stream.jump_to(u16::from_le_bytes(entry.offset_of_first_attribute) as usize);
+    // // let mut header = stream.read::<MftAttributeHeader>()?;
 
-    println!("Start");
-    loop {
-        if u32::from_le_bytes(header.attribute_type) == 0x80 {
-            let nonresident_header = stream.read::<NonResidentAttributeHeader>()?;
-            println!("nonresident_header: {:#?}", nonresident_header);
-        } else if u32::from_le_bytes(header.attribute_type) == 0xFFFFFFFF {
-            break;
-        }
-        header = stream.read::<MftAttributeHeader>()?;
-    }
+    // println!("Start");
+    // loop {
+    //     let attribute_type = u32::from_le_bytes(header.attribute_type);
+    //     if attribute_type == 0x10 {
+    //         let index = stream.get_index();
+    //         println!("index: {:02x}", index);
+    //         let resident_header = stream.read::<ResidentAttributeHeader>()?;
+    //         println!("resident_header: {:#?}", resident_header);
+    //         println!("attribute_length: {:02x}", u32::from_le_bytes(resident_header.attribute_length));
+    //         println!("attribute_offset: {:02x}", u16::from_le_bytes(resident_header.attribute_offset));
+    //         stream.jump_to(index + u16::from_le_bytes(resident_header.attribute_offset) as usize);
 
-    println!("Attribute header: {:#02x}", u32::from_le_bytes(header.attribute_type));
+    //     } else if attribute_type == 0x80 {
+    //         let nonresident_header = stream.read::<NonResidentAttributeHeader>()?;
+    //         println!("nonresident_header: {:#?}", nonresident_header);
+    //     } else if attribute_type == 0xFFFFFFFF {
+    //         break;
+    //     }
+    //     header = stream.read::<MftAttributeHeader>()?;
+    // }
+
+    // println!("Attribute header: {:#02x}", u32::from_le_bytes(header.attribute_type));
 
     Ok(())
 }
