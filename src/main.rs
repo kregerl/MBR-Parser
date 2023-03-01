@@ -1,12 +1,14 @@
 use crate::mbr::parse_mbr;
 use clap::Parser;
 use gpt::{display_gpt, parse_gpt};
-use mbr::{display_mbr, parse_pbr};
-use std::path::Path;
+use mbr::{display_mbr};
+use mft::parse_pbr;
+use std::{path::Path, fs::File, io::Read};
 
 mod bytestream;
 mod gpt;
 mod mbr;
+mod mft;
 
 #[derive(Debug, Parser)]
 struct Arguments {
@@ -44,4 +46,16 @@ fn main() {
         }
         Err(e) => eprintln!("Parse Error: {}", e),
     }
+}
+
+#[test]
+pub fn test_open_drive() {
+    use std::fs::{OpenOptions};
+
+    let path = Path::new("\\\\.\\PhysicalDrive0");
+    let mut f = OpenOptions::new().read(true).open(path).unwrap();
+    // Windows requires that physical drives are read in sectors.
+    let mut x = vec![0u8; 512];
+    f.read_exact(&mut x).unwrap();
+    println!("Buffer: {:#?}", x);
 }

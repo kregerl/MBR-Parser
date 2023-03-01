@@ -1,14 +1,11 @@
+use crate::bytestream::{interpret_bytes_as_utf16, ByteStream, Readable, SECTOR_SIZE};
+use prettytable::{row, Table};
 use std::{
     fmt::Display,
-    io::{self, Bytes, Read, BufReader},
+    io::{self},
     path::Path,
-    string::{FromUtf16Error, FromUtf8Error}, fs::File,
+    string::FromUtf16Error,
 };
-
-use byteorder::ReadBytesExt;
-use prettytable::{row, Table};
-
-use crate::bytestream::{self, ByteStream, Readable, SECTOR_SIZE, interpret_bytes_as_utf16};
 
 // https://www.ietf.org/rfc/rfc4122.txt
 // 4.1.2.  Layout and Byte Order
@@ -69,6 +66,15 @@ impl ToString for Guid {
     }
 }
 
+impl Readable for Guid {
+    fn read(reader: &mut ByteStream) -> io::Result<Self>
+    where
+        Self: Sized,
+    {
+        Ok(Guid::new(reader.read_byte_array::<16>()?))
+    }
+}
+
 #[test]
 fn test_guid() {
     // https://developer.apple.com/library/archive/technotes/tn2166/_index.html#//apple_ref/doc/uid/DTS10003927-CH1-SECTION2
@@ -109,13 +115,11 @@ impl Readable for GptHeader {
     where
         Self: Sized,
     {
-        let mut efi_part_buffer = vec![0u8; 8];
-        reader.get_reader().read_exact(&mut efi_part_buffer)?;
+        let efi_part_buffer = reader.read_byte_array::<8>()?;
+        let revision_buffer = reader.read_byte_array::<4>()?;
 
-        let mut revision_buffer = [0u8; 4];
-        reader.get_reader().read_exact(&mut revision_buffer)?;
         Ok(Self {
-            efi_part: String::from_utf8(efi_part_buffer).unwrap(),
+            efi_part: String::from_utf8(efi_part_buffer.to_vec()).unwrap().trim().into(),
             revision: revision_buffer,
             header_size: reader.read()?,
             crc32: reader.read()?,
@@ -124,7 +128,7 @@ impl Readable for GptHeader {
             backup_lba: reader.read()?,
             first_usable_lba: reader.read()?,
             last_usable_lba: reader.read()?,
-            disk_guid: Guid::new(reader.read_byte_array::<16>()?),
+            disk_guid: reader.read::<Guid>()?,
             starting_lba_of_partition_entries: reader.read()?,
             number_partition_entries: reader.read()?,
             size_single_partition_entry: reader.read()?,
@@ -146,16 +150,14 @@ pub struct GptPartitionTableEntry {
 impl Readable for GptPartitionTableEntry {
     fn read(reader: &mut ByteStream) -> io::Result<Self>
     where
-        Self: Sized {
-        let partition_type_guid = Guid::new(reader.read_byte_array::<16>()?);
-        let unique_partition_guid= Guid::new(reader.read_byte_array::<16>()?);
-        let starting_lba= reader.read()?;
-        let ending_lba= reader.read()?;
-        let mut attribute_flag_buffer = [0u8; 8];
-        reader.get_reader().read_exact(&mut attribute_flag_buffer)?;
-
-        let mut partition_name_buffer = [0u8; 72];
-        reader.get_reader().read_exact(&mut partition_name_buffer)?;
+        Self: Sized,
+    {
+        let partition_type_guid = reader.read::<Guid>()?;
+        let unique_partition_guid = reader.read::<Guid>()?;
+        let starting_lba = reader.read()?;
+        let ending_lba = reader.read()?;
+        let attribute_flag_buffer = reader.read_byte_array::<8>()?;
+        let partition_name_buffer = reader.read_byte_array::<72>()?;
 
         Ok(Self {
             partition_type_guid,
@@ -170,7 +172,7 @@ impl Readable for GptPartitionTableEntry {
 
 impl GptPartitionTableEntry {
     fn is_empty(&self) -> bool {
-            self.starting_lba == 0
+        self.starting_lba == 0
             && self.ending_lba == 0
             && self.attribute_flags.iter().all(|byte| *byte == 0)
             && self.partition_name.iter().all(|byte| *byte == 0)
@@ -231,6 +233,10 @@ pub fn parse_gpt(path: &Path) -> io::Result<Vec<GptPartitionTableEntry>> {
     let mut stream = ByteStream::new(path)?;
     stream.jump_to_sector(1)?;
     let header = stream.read::<GptHeader>()?;
+
+    if header.efi_part == "EFI PART" {
+        //FIXME: Throw error if invalid header.
+    }
 
     println!("Header guid: {}", header.disk_guid.to_string());
     println!();

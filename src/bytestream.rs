@@ -1,7 +1,8 @@
 use std::{
     fs::File,
-    io::{self, BufReader, Read, Seek, SeekFrom},
-    path::Path, string::FromUtf16Error,
+    io::{self, BufRead, BufReader, Read, Seek, SeekFrom},
+    path::Path,
+    string::FromUtf16Error,
 };
 
 use byteorder::ReadBytesExt;
@@ -99,6 +100,14 @@ impl ByteStream {
         Ok(buffer)
     }
 
+    // Read until `delimeter_byte` excluding the byte itself
+    pub fn read_until(&mut self, delimeter_byte: u8) -> io::Result<Vec<u8>> {
+        let mut buffer = vec![0u8; 0];
+        self.reader.read_until(delimeter_byte, &mut buffer)?;
+        self.reader.seek(SeekFrom::Current(-1))?;
+        Ok(buffer[..buffer.len() - 1].to_vec())
+    }
+
     /// Reads raw bytes from sectors starting at `from` until `from + amount` without advancing the buffered reader's index.
     pub fn read_raw_sectors(&mut self, from: usize, amount: usize) -> io::Result<Vec<u8>> {
         let start = from * SECTOR_SIZE;
@@ -116,6 +125,16 @@ impl ByteStream {
         Ok(buffer)
     }
 
+    pub fn peek<T>(&mut self) -> io::Result<T>
+    where
+        T: Readable,
+    {
+        let current_index = self.reader.seek(SeekFrom::Current(0))?;
+        let result = T::read(self)?;
+        let _ = self.reader.seek(SeekFrom::Start(current_index))?;
+        Ok(result)
+    }
+
     pub fn read<T>(&mut self) -> io::Result<T>
     where
         T: Readable,
@@ -125,7 +144,7 @@ impl ByteStream {
 
     // Reads S bytes from the stream
     pub fn read_byte_array<const S: usize>(&mut self) -> io::Result<[u8; S]> {
-        let mut buffer= [0u8; S];
+        let mut buffer = [0u8; S];
         self.reader.read_exact(&mut buffer)?;
         Ok(buffer)
     }
@@ -140,7 +159,6 @@ impl ByteStream {
     }
 }
 
-
 pub fn interpret_bytes_as_utf16(name_bytes: &[u8]) -> Result<String, FromUtf16Error> {
     let num_bytes = name_bytes.len();
     let mut unicode_symbols: Vec<u16> = Vec::with_capacity(num_bytes / 2);
@@ -150,7 +168,6 @@ pub fn interpret_bytes_as_utf16(name_bytes: &[u8]) -> Result<String, FromUtf16Er
         let second = name_bytes[index + 1];
         unicode_symbols.push(bytes_to_u16(first, second));
     }
-
     String::from_utf16(&unicode_symbols)
 }
 
