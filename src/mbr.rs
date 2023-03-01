@@ -1,16 +1,14 @@
+use crate::bytestream::{interpret_bytes_as_utf16, ByteStream, Readable, SECTOR_SIZE};
+use prettytable::{row, Row, Table};
 use std::{
-    io::{self, BufRead, Seek},
+    fmt::Display,
+    io::{self, Seek},
     path::Path,
     string::FromUtf8Error,
 };
 
-use byteorder::ReadBytesExt;
-use prettytable::{row, Attr, Row, Table};
-
-use crate::bytestream::{interpret_bytes_as_utf16, ByteStream, Readable, SECTOR_SIZE};
-
 const BOOTSTRAPER_LENGTH: usize = 446;
-// const BOOT_SIGNATURE: [u8; 2] = [0x55, 0xAA];
+const BOOT_SIGNATURE: [u8; 2] = [0x55, 0xAA];
 const CHS_SECTOR_BIT_SIZE: u8 = 6;
 const FIRST_TWO_BIT_MASK: u16 = 0b11000000;
 pub const GPT_PARTITION_TYPE: u8 = 0xee;
@@ -504,7 +502,7 @@ pub fn parse_pbr(
             let _ = stream.read_byte_array::<426>()?;
             assert_eq!(
                 stream.read_byte_array::<2>()?,
-                [0x55, 0xAA],
+                BOOT_SIGNATURE,
                 "End of sector was not reached"
             );
 
@@ -719,7 +717,7 @@ impl Readable for AttributeHeader {
                 }
             }
         } else {
-            // Read the non resident attribute header 
+            // Read the non resident attribute header
             let non_resident_attribute_header = reader.read::<NonResidentAttributeHeader>()?;
             if common_attribute_header.name_length > 0 {
                 // If is is named, read the name
@@ -743,29 +741,168 @@ impl Readable for AttributeHeader {
     }
 }
 
-#[derive(Debug)]
-struct StandardInformation {
-    datetime_file_creation: [u8; 8],
-    datetime_file_modification: [u8; 8],
-    datetime_mft_modification: [u8; 8],
-    datetime_file_reading: [u8; 8],
-    file_permissions: [u8; 4],
-    maximum_number_versions: [u8; 4],
-    version_number: [u8; 8],
+#[derive(Debug, Clone)]
+struct PermissionParseError;
+
+impl Display for PermissionParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "invalid NTFS permissions integer")
+    }
 }
 
+#[derive(Debug)]
+#[repr(u32)]
+enum NtfsPermissions {
+    ReadOnly = 0x0001,
+    Hidden = 0x0002,
+    System = 0x0004,
+    Archive = 0x0020,
+    Device = 0x0040,
+    Normal = 0x0080,
+    Temporary = 0x0100,
+    SparseFile = 0x0200,
+    ReparseFile = 0x0400,
+    Compressed = 0x0800,
+    Offline = 0x1000,
+    NotContentIndexed = 0x2000,
+    Encrypted = 0x4000,
+}
+
+impl TryFrom<u32> for NtfsPermissions {
+    type Error = PermissionParseError;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        match value {
+            0x0001 => Ok(NtfsPermissions::ReadOnly),
+            0x0002 => Ok(NtfsPermissions::Hidden),
+            0x0004 => Ok(NtfsPermissions::System),
+            0x0020 => Ok(NtfsPermissions::Archive),
+            0x0040 => Ok(NtfsPermissions::Device),
+            0x0080 => Ok(NtfsPermissions::Normal),
+            0x0100 => Ok(NtfsPermissions::Temporary),
+            0x0200 => Ok(NtfsPermissions::SparseFile),
+            0x0400 => Ok(NtfsPermissions::ReparseFile),
+            0x0800 => Ok(NtfsPermissions::Compressed),
+            0x1000 => Ok(NtfsPermissions::Offline),
+            0x2000 => Ok(NtfsPermissions::NotContentIndexed),
+            0x4000 => Ok(NtfsPermissions::Encrypted),
+            _ => Err(PermissionParseError),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct StandardInformation {
+    datetime_file_creation: u64,
+    datetime_file_modification: u64,
+    datetime_mft_modification: u64,
+    datetime_file_reading: u64,
+    file_permission_flags: u32,
+    maximum_number_versions: u32,
+    version_number: u64,
+}
+
+impl Readable for StandardInformation {
+    fn read(reader: &mut ByteStream) -> io::Result<Self>
+    where
+        Self: Sized,
+    {
+        Ok(Self {
+            datetime_file_creation: reader.read::<u64>()?,
+            datetime_file_modification: reader.read::<u64>()?,
+            datetime_mft_modification: reader.read::<u64>()?,
+            datetime_file_reading: reader.read::<u64>()?,
+            file_permission_flags: reader.read::<u32>()?,
+            maximum_number_versions: reader.read::<u32>()?,
+            version_number: reader.read::<u64>()?,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct FileName {
+    reference_to_parent_dir: u64,
+    datetime_file_creation: u64,
+    datetime_file_modification: u64,
+    datetime_mft_modification: u64,
+    datetime_file_reading: u64,
+    file_size_allocated_on_disk: u64,
+    real_file_size: u64,
+    file_permission_flags: u32,
+    extended_attributes_and_reparse: u32,
+    name_size: u8,
+    name: String,
+    // 6 Bytes of padding
+}
+
+impl Readable for FileName {
+    fn read(reader: &mut ByteStream) -> io::Result<Self>
+    where
+        Self: Sized,
+    {
+        let reference_to_parent_dir = reader.read::<u64>()?;
+        let datetime_file_creation = reader.read::<u64>()?;
+        let datetime_file_modification = reader.read::<u64>()?;
+        let datetime_mft_modification = reader.read::<u64>()?;
+        let datetime_file_reading = reader.read::<u64>()?;
+        let file_size_allocated_on_disk = reader.read::<u64>()?;
+        let real_file_size = reader.read::<u64>()?;
+        let file_permission_flags = reader.read::<u32>()?;
+        let extended_attributes_and_reparse = reader.read::<u32>()?;
+        let name_size = reader.read::<u8>()?;
+        let name_bytes = reader.read_raw(name_size as usize * 2)?;
+        // FIXME: File name is being interpreted wrongly, should be unicode
+        let name = interpret_bytes_as_utf16(&name_bytes)
+            .expect("Invalid utf16 bytes in attribute header.");
+        // 6 Bytes of padding
+        let _ = reader.read_byte_array::<6>()?;
+        Ok(Self {
+            reference_to_parent_dir,
+            datetime_file_creation,
+            datetime_file_modification,
+            datetime_mft_modification,
+            datetime_file_reading,
+            file_size_allocated_on_disk,
+            real_file_size,
+            file_permission_flags,
+            extended_attributes_and_reparse,
+            name_size,
+            name,
+        })
+    }
+}
+
+// https://sabercomlogica.com/en/ntfs-resident-and-no-named-attributes/
 fn parse_mft(stream: &mut ByteStream, mft_lba: u64) -> io::Result<()> {
     stream.jump_to_sector(mft_lba)?;
     println!("Jump: {:#?}", stream.get_reader().stream_position());
     let mft_file_descriptor = stream.read::<MftFileDescriptor>()?;
     if *b"FILE" == mft_file_descriptor.signature {
-        let attribute_offset = (mft_lba * SECTOR_SIZE as u64) + mft_file_descriptor.offset_fist_attribute as u64;
-        // println!("After FDS Read: {:#?}", stream.get_reader().stream_position());
-        // println!("File Descriptor: {:#?}", mft_file_descriptor);
+        let attribute_offset =
+            (mft_lba * SECTOR_SIZE as u64) + mft_file_descriptor.offset_fist_attribute as u64;
         stream.jump_to_byte(attribute_offset)?;
+        println!("Here: {}", attribute_offset);
         let attribute_header = stream.read::<AttributeHeader>()?;
-        println!("After attr header: {:#?}", stream.get_reader().stream_position());
-        println!("Attribute Header: {:#?}", attribute_header);
+        println!("attribute_header: {:#?}", attribute_header);
+
+        let standard_information = stream.read::<StandardInformation>()?;
+        println!("Standard Info: {:#?}", standard_information);
+        println!(
+            "Unix Epoch: {}",
+            (standard_information.datetime_file_creation - 116444736000000000) / 10000000
+        );
+
+        if let AttributeHeader::ResidentNoName { common_header, .. } = attribute_header {
+            stream.jump_to_byte(attribute_offset + common_header.length as u64)?;
+            let next_attribute_header = stream.read::<AttributeHeader>()?;
+            println!("Next Attribute Header: {:#?}", next_attribute_header);
+            // Increment by attribute_offset
+            stream.jump_to_byte(attribute_offset + common_header.length as u64 + 24)?;
+            // FIXME: File name is being read incorrectly, should be $MFT in this instance. The bytes
+            // being read are correct but they are not being converted to strings correctly.
+            let file_name = stream.read::<FileName>()?;
+            println!("file_name: {:#?}", file_name);
+        }
     } else {
         eprintln!("Bad file signature found in MFT file descriptor.");
     }
