@@ -569,6 +569,10 @@ fn parse_mft(stream: &mut ByteStream, mft_lba: u64) -> io::Result<()> {
                     }
                     0x80 => {
                         //FIXME: $DATA
+                        eprintln!(
+                            "Ignored attribute_header: {:#?} of type {:#02x}",
+                            attribute_header, common_header.attribute_type
+                        );
                         todo!("$DATA")
                     }
                     0x90 => {
@@ -671,3 +675,36 @@ fn parse_mft(stream: &mut ByteStream, mft_lba: u64) -> io::Result<()> {
 // fn parse_attribute_type() -> Result<(), > {
 
 // }
+
+#[test]
+fn datarun_test() {
+    // let datarun: [u8; 8] = [0x21, 0x18, 0x34, 0x56, 0x00, 0x00, 0x00, 0x00];
+    // let datarun: [u8; 8] = [0x31, 0x01, 0x41, 0x00, 0x01, 0x00, 0x00, 0x00];
+    let datarun: [u8; 8] = [0x31, 0x40, 0x55, 0x4f, 0x01, 0x00, 0x00, 0x00];
+    //356864000
+    //356929536
+    let mut length: u64 = 0;
+    let mut offset: i64 = 0;
+
+    let high_nibble = (datarun[0] & 0b11110000) >> 4;
+    let low_nibble = datarun[0] & 0b00001111;
+
+    for i in 0..low_nibble as usize {
+        length |= (datarun[1 + i] as u64) << (i * 8);
+    }
+
+    for i in 0..high_nibble as usize {
+        offset |= (datarun[1 + low_nibble as usize + i] as i64) << (i * 8);
+    }
+
+    println!("Here: {:#04x}", offset & (1 << (high_nibble * 8 - 1)));
+    if offset & (1 << (high_nibble * 8 - 1)) > 0 {
+        for i in 0..high_nibble as usize {
+            offset |= (0xFF as i64) << (i * 8);
+        }
+    }
+
+    println!("Length: {:#04x}", length);
+    println!("Offset: {:#04x}", offset);
+
+}
