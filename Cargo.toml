@@ -10,6 +10,7 @@ authors =["Loucas K. <loucas.kreger@gmail.com>"]
 clap = { version = "4.1.6", features = ["derive"] }
 prettytable-rs = "0.10.0"
 byteorder = "1.4.3"
+chrono = "0.4.23"
 
 [package.metadata.deb]
 assets = [

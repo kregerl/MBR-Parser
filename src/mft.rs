@@ -1,15 +1,14 @@
-use std::{
-    fmt::{self, Display},
-    fs::File,
-    io::{self, Read, Seek},
-    path::Path,
-    string::FromUtf8Error,
-};
-
 use crate::{
     bytestream::{interpret_bytes_as_utf16, ByteStream, Readable, SECTOR_SIZE},
     mbr::{MbrPartitionTableEntryNode, BOOT_SIGNATURE},
-    mft,
+};
+use chrono::{DateTime, Local};
+use std::{
+    fmt::Display,
+    io::{self, Seek},
+    path::Path,
+    string::FromUtf8Error,
+    time::{Duration, UNIX_EPOCH},
 };
 
 #[derive(Debug)]
@@ -405,11 +404,29 @@ impl TryFrom<u32> for NtfsPermissions {
 }
 
 #[derive(Debug)]
+struct NtfsDatetime {
+    datetime: DateTime<Local>,
+}
+
+impl Readable for NtfsDatetime {
+    fn read(reader: &mut ByteStream) -> io::Result<Self>
+    where
+        Self: Sized,
+    {
+        let ole2_timestamp = reader.read::<u64>()?;
+        let timestamp_unix_epoch = (ole2_timestamp - 116444736000000000) / 10000000;
+        let datetime =
+            DateTime::<Local>::from(UNIX_EPOCH + Duration::from_secs(timestamp_unix_epoch));
+        Ok(Self { datetime })
+    }
+}
+
+#[derive(Debug)]
 struct StandardInformation {
-    datetime_file_creation: u64,
-    datetime_file_modification: u64,
-    datetime_mft_modification: u64,
-    datetime_file_reading: u64,
+    datetime_file_creation: NtfsDatetime,
+    datetime_file_modification: NtfsDatetime,
+    datetime_mft_modification: NtfsDatetime,
+    datetime_file_reading: NtfsDatetime,
     file_permission_flags: u32,
     maximum_number_versions: u32,
     version_number: u64,
@@ -421,10 +438,10 @@ impl Readable for StandardInformation {
         Self: Sized,
     {
         Ok(Self {
-            datetime_file_creation: reader.read::<u64>()?,
-            datetime_file_modification: reader.read::<u64>()?,
-            datetime_mft_modification: reader.read::<u64>()?,
-            datetime_file_reading: reader.read::<u64>()?,
+            datetime_file_creation: reader.read::<NtfsDatetime>()?,
+            datetime_file_modification: reader.read::<NtfsDatetime>()?,
+            datetime_mft_modification: reader.read::<NtfsDatetime>()?,
+            datetime_file_reading: reader.read::<NtfsDatetime>()?,
             file_permission_flags: reader.read::<u32>()?,
             maximum_number_versions: reader.read::<u32>()?,
             version_number: reader.read::<u64>()?,
@@ -435,10 +452,10 @@ impl Readable for StandardInformation {
 #[derive(Debug)]
 struct FileName {
     reference_to_parent_dir: u64,
-    datetime_file_creation: u64,
-    datetime_file_modification: u64,
-    datetime_mft_modification: u64,
-    datetime_file_reading: u64,
+    datetime_file_creation: NtfsDatetime,
+    datetime_file_modification: NtfsDatetime,
+    datetime_mft_modification: NtfsDatetime,
+    datetime_file_reading: NtfsDatetime,
     file_size_allocated_on_disk: u64,
     real_file_size: u64,
     file_permission_flags: u32,
@@ -455,10 +472,10 @@ impl Readable for FileName {
         Self: Sized,
     {
         let reference_to_parent_dir = reader.read::<u64>()?;
-        let datetime_file_creation = reader.read::<u64>()?;
-        let datetime_file_modification = reader.read::<u64>()?;
-        let datetime_mft_modification = reader.read::<u64>()?;
-        let datetime_file_reading = reader.read::<u64>()?;
+        let datetime_file_creation = reader.read::<NtfsDatetime>()?;
+        let datetime_file_modification = reader.read::<NtfsDatetime>()?;
+        let datetime_mft_modification = reader.read::<NtfsDatetime>()?;
+        let datetime_file_reading = reader.read::<NtfsDatetime>()?;
         let file_size_allocated_on_disk = reader.read::<u64>()?;
         let real_file_size = reader.read::<u64>()?;
         let file_permission_flags = reader.read::<u32>()?;
@@ -488,11 +505,11 @@ impl Readable for FileName {
 }
 
 #[derive(Debug)]
-struct DataRuns {
+struct DataRun {
     dataruns: Vec<u8>,
 }
 
-impl Readable for DataRuns {
+impl Readable for DataRun {
     fn read(reader: &mut ByteStream) -> io::Result<Self>
     where
         Self: Sized,
@@ -506,10 +523,10 @@ impl Readable for DataRuns {
 fn parse_mft(stream: &mut ByteStream, mft_lba: u64) -> io::Result<()> {
     println!("LBA: {}", mft_lba);
     let mut starting_offset = mft_lba * SECTOR_SIZE as u64;
-    println!("Jump: {:#?}", stream.get_reader().stream_position());
     let mut file_name_attrs: Vec<FileName> = Vec::new();
     loop {
         stream.jump_to_byte(starting_offset)?;
+        println!("Jump: {:#?}", stream.get_reader().stream_position());
         let mft_file_descriptor = stream.read::<MftFileDescriptor>()?;
         if *b"FILE" == mft_file_descriptor.signature {
             let attribute_start_offset =
@@ -521,58 +538,76 @@ fn parse_mft(stream: &mut ByteStream, mft_lba: u64) -> io::Result<()> {
                 let attribute_header = stream.read::<AttributeHeader>()?;
                 let common_header = attribute_header.common_header();
 
+                // FIXME account for update sequences: https://stackoverflow.com/questions/55126151/ntfs-mft-datarun
+                // https://www.youtube.com/watch?v=6WFUM5eViIk
                 match common_header.attribute_type {
                     0x10 => {
                         let standard_information = stream.read::<StandardInformation>()?;
                         println!("standard_information: {:#?}", standard_information);
-                    },
-                    0x20 => {},
+                    }
+                    0x20 => {}
                     0x30 => {
                         let file_name = stream.read::<FileName>()?;
                         println!("file_name: {:#?}", file_name);
                         file_name_attrs.push(file_name);
-                    },
+                    }
                     0x40 => {
                         //FIXME: $OJECT_ID
-                    },
+                        todo!("$OJECT_ID")
+                    }
                     0x50 => {
                         //FIXME: Read $SECURITY_DEXCRIPTOR
-                    },
+                        todo!("$SECURITY_DEXCRIPTOR")
+                    }
                     0x60 => {
                         //FIXME: $VOLUMNE_NAME
-                    },
+                        todo!("$VOLUMNE_NAME")
+                    }
                     0x70 => {
                         //FIXME: $VOLUMNE_INFORMATION
-                    },
+                        todo!("$VOLUMNE_INFORMATION")
+                    }
                     0x80 => {
                         //FIXME: $DATA
-                    },
+                        todo!("$DATA")
+                    }
                     0x90 => {
                         //FIXME: $INDEX_ROOT
-                    },
+                        todo!("$INDEX_ROOT")
+                    }
                     0xA0 => {
                         //FIXME: $INDEX_ALLOCATION
-                    },
+                        todo!("$INDEX_ALLOCATION")
+                    }
                     0xB0 => {
                         //FIXME: $BITMAP
-                    },
+                        todo!("$BITMAP")
+                    }
                     0xC0 => {
                         //FIXME: $REPARSE_POINT
-                    },
+                        todo!("$REPARSE_POINT")
+                    }
                     0xD0 => {
                         //FIXME: $EA_INFORMATION
-                    },
+                        todo!("$EA_INFORMATION")
+                    }
                     0xE0 => {
                         //FIXME: $EA
-                    },
+                        todo!("$EA")
+                    }
                     0xF0 => {
                         //FIXME: $PROPERTY_SET
-                    },
-                    0x100 =>{
+                        todo!("$PROPERTY_SET")
+                    }
+                    0x100 => {
                         //FIXME: $LOGGED_UTILITY_STREAM
-                    },
+                        todo!("$LOGGED_UTILITY_STREAM")
+                    }
                     _ => {
-                        eprintln!("Ignored attribute_header: {:#?} of type {:#02x}", attribute_header, common_header.attribute_type);
+                        eprintln!(
+                            "Ignored attribute_header: {:#?} of type {:#02x}",
+                            attribute_header, common_header.attribute_type
+                        );
                         starting_offset += mft_file_descriptor.space_allocated as u64;
                         break;
                     }
