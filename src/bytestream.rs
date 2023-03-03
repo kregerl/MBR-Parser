@@ -100,14 +100,6 @@ impl ByteStream {
         Ok(buffer)
     }
 
-    // Read until `delimeter_byte` excluding the byte itself
-    pub fn read_until(&mut self, delimeter_byte: u8) -> io::Result<Vec<u8>> {
-        let mut buffer = vec![0u8; 0];
-        self.reader.read_until(delimeter_byte, &mut buffer)?;
-        self.reader.seek(SeekFrom::Current(-1))?;
-        Ok(buffer[..buffer.len() - 1].to_vec())
-    }
-
     /// Reads raw bytes from sectors starting at `from` until `from + amount` without advancing the buffered reader's index.
     pub fn read_raw_sectors(&mut self, from: usize, amount: usize) -> io::Result<Vec<u8>> {
         let start = from * SECTOR_SIZE;
