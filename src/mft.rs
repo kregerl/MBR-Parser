@@ -90,10 +90,8 @@ impl NtfsPartitionBootRecord {
 
 pub fn parse_pbr(
     path: &Path,
-    partition_table_entry: &MbrPartitionTableEntryNode,
+    starting_lba: u64,
 ) -> io::Result<()> {
-    let starting_lba = partition_table_entry.starting_lba() as u64;
-
     let mut stream = ByteStream::new(path)?;
     stream.jump_to_sector(starting_lba)?;
     let partition_boot_record = stream.read::<NtfsPartitionBootRecord>()?;
@@ -107,23 +105,25 @@ pub fn parse_pbr(
                 "End of sector was not reached"
             );
 
-            println!("PBR: {:#?}", partition_boot_record);
             let mft_lba = starting_lba
                 + (partition_boot_record.mft_lcn
                     * partition_boot_record.sectors_per_cluster as u64);
-            // let backup_mft_lba = starting_lba + (partition_boot_record.backup_mft_lcn * partition_boot_record.sectors_per_cluster as u64);
-            parse_mft(&mut stream, mft_lba)?;
+            // - If this value, when read in two’s complement, is positive,
+            //   i.e. if its value goes from 00h to 7Fh (0000 0000 a 0111 1111),
+            //   it actually designates the number of clusters per register
+            // - If this value, when read in two’s complement, is negative,
+            //   i.e. if its value goes from 80h to FFh (1000 0000 a 1111 1111), the
+            //   size in bytes of each register will be equal to  2 to the power of the byte absolute value.
+            let mft_size = if partition_boot_record.mft_size < 0 {
+                2u32.pow(partition_boot_record.mft_size.abs() as u32)
+            } else {
+                todo!("mft_size")
+            };
+            parse_mft(&mut stream, mft_lba, mft_size)?;
         }
         Err(e) => eprintln!("Error parsing OEM ID: {}", e),
         _ => eprintln!("Cannot parse $MFT of a non-NTFS partition"),
     }
-    // let mft_lba = starting_lba + u64::from_le_bytes(pbr.mft_lcn) * pbr.sectors_per_cluster as u64;
-    // let backup_mft_lba = starting_lba + u64::from_le_bytes(pbr.backup_mft_lcn) * pbr.sectors_per_cluster as u64;
-    // println!("mft_lba: {:02x}", mft_lba * 512);
-    // println!("mft_size: {}", pbr.mft_size);
-
-    // parse_file_entry(path, mft_lba as usize)?;
-
     Ok(())
 }
 
@@ -233,9 +233,9 @@ struct NonResidentAttributeHeader {
     ending_vcn: u64,
     data_runs_offset: u16,
     compression_unit_size: u16,
-    allocated_size_of_attribute: u64,
-    real_size_of_attribute: u64,
-    initialized_data_size: u64,
+    file_allocation_size: u64,
+    file_real_size: u64,
+    initial_stream_size: u64,
 }
 
 impl Readable for NonResidentAttributeHeader {
@@ -257,9 +257,9 @@ impl Readable for NonResidentAttributeHeader {
             ending_vcn,
             data_runs_offset,
             compression_unit_size,
-            allocated_size_of_attribute,
-            real_size_of_attribute,
-            initialized_data_size,
+            file_allocation_size: allocated_size_of_attribute,
+            file_real_size: real_size_of_attribute,
+            initial_stream_size: initialized_data_size,
         })
     }
 }
@@ -343,7 +343,44 @@ impl Readable for AttributeHeader {
 }
 
 impl AttributeHeader {
-    pub fn common_header(&self) -> &CommonAttributeHeader {
+    pub fn attribute_type(&self) -> u32 {
+        self.common_header().attribute_type
+    }
+
+    pub fn attribute_length(&self) -> u32 {
+        self.common_header().length
+    }
+
+    pub fn file_allocation_size(&self) -> Option<u64> {
+        match self {
+            AttributeHeader::ResidentNoName { .. } => None,
+            AttributeHeader::ResidentNamed { .. } => None,
+            AttributeHeader::NonResidentNoName {
+                non_resident_header,
+                ..
+            } => Some(non_resident_header.file_allocation_size),
+            AttributeHeader::NonResidentNamed {
+                non_resident_header,
+                ..
+            } => Some(non_resident_header.file_allocation_size),
+        }
+    }
+
+    pub fn datarun_offset(&self) -> u16 {
+        match self {
+            AttributeHeader::NonResidentNoName {
+                non_resident_header,
+                ..
+            } => non_resident_header.data_runs_offset,
+            AttributeHeader::NonResidentNamed {
+                non_resident_header,
+                ..
+            } => non_resident_header.data_runs_offset,
+            _ => 0,
+        }
+    }
+
+    fn common_header(&self) -> &CommonAttributeHeader {
         match self {
             AttributeHeader::ResidentNoName { common_header, .. } => common_header,
             AttributeHeader::ResidentNamed { common_header, .. } => common_header,
@@ -506,7 +543,8 @@ impl Readable for FileName {
 
 #[derive(Debug)]
 struct DataRun {
-    dataruns: Vec<u8>,
+    length: u64,
+    offset: i64,
 }
 
 impl Readable for DataRun {
@@ -514,173 +552,161 @@ impl Readable for DataRun {
     where
         Self: Sized,
     {
-        let dataruns = reader.read_until(0x00)?;
-        Ok(Self { dataruns })
+        // Assuming the data run will be at most 8 bytes
+        let datarun = reader.read_byte_array::<8>()?;
+        let mut length: u64 = 0;
+        let mut offset: i64 = 0;
+
+        let high_nibble = (datarun[0] & 0b11110000) >> 4;
+        let low_nibble = datarun[0] & 0b00001111;
+
+        for i in 0..low_nibble as usize {
+            length |= (datarun[1 + i] as u64) << (i * 8);
+        }
+
+        for i in 0..high_nibble as usize {
+            offset |= (datarun[1 + low_nibble as usize + i] as i64) << (i * 8);
+        }
+
+        if offset & (1 << (high_nibble * 8 - 1)) > 0 {
+            for i in 0..high_nibble as usize {
+                offset |= (0xFF as i64) << (i * 8);
+            }
+        }
+
+        Ok(Self { length, offset })
     }
 }
 
-// https://sabercomlogica.com/en/ntfs-resident-and-no-named-attributes/
-fn parse_mft(stream: &mut ByteStream, mft_lba: u64) -> io::Result<()> {
-    println!("LBA: {}", mft_lba);
-    let mut starting_offset = mft_lba * SECTOR_SIZE as u64;
-    let mut file_name_attrs: Vec<FileName> = Vec::new();
-    loop {
-        stream.jump_to_byte(starting_offset)?;
-        println!("Jump: {:#?}", stream.get_reader().stream_position());
-        let mft_file_descriptor = stream.read::<MftFileDescriptor>()?;
-        if *b"FILE" == mft_file_descriptor.signature {
-            let attribute_start_offset =
-                starting_offset + mft_file_descriptor.offset_first_attribute as u64;
+#[derive(Debug)]
+enum MftAttribute {
+    StandardInformation(StandardInformation),
+    FileName(FileName),
+    Data(DataRun),
+}
+
+#[derive(Debug)]
+struct MftFileRecord {
+    file_descriptor: MftFileDescriptor,
+    attributes: Vec<(AttributeHeader, MftAttribute)>,
+}
+
+fn parse_mft_file_record(
+    stream: &mut ByteStream,
+    offset: u64,
+    ignore_data_attribute: bool,
+) -> io::Result<Option<MftFileRecord>> {
+    stream.jump_to_byte(offset)?;
+    let mft_file_descriptor = stream.read::<MftFileDescriptor>()?;
+    let mut attributes: Vec<(AttributeHeader, MftAttribute)> = Vec::new();
+    match &mft_file_descriptor.signature {
+        b"FILE" => {
+            let attribute_start_offset = offset + mft_file_descriptor.offset_first_attribute as u64;
             let mut attribute_offset: u64 = 0;
 
             while stream.peek::<u32>()? != u32::MAX {
                 stream.jump_to_byte(attribute_start_offset + attribute_offset)?;
                 let attribute_header = stream.read::<AttributeHeader>()?;
-                let common_header = attribute_header.common_header();
+                let length = attribute_header.attribute_length();
 
-                // FIXME account for update sequences: https://stackoverflow.com/questions/55126151/ntfs-mft-datarun
-                // https://www.youtube.com/watch?v=6WFUM5eViIk
-                match common_header.attribute_type {
+                // FIXME: account for update sequences: https://stackoverflow.com/questions/55126151/ntfs-mft-datarun
+                // Currently ignoring $DATA attributes that are not the $MFT itself.
+                match attribute_header.attribute_type() {
                     0x10 => {
                         let standard_information = stream.read::<StandardInformation>()?;
-                        println!("standard_information: {:#?}", standard_information);
+                        attributes.push((
+                            attribute_header,
+                            MftAttribute::StandardInformation(standard_information),
+                        ));
                     }
-                    0x20 => {}
                     0x30 => {
                         let file_name = stream.read::<FileName>()?;
-                        println!("file_name: {:#?}", file_name);
-                        file_name_attrs.push(file_name);
-                    }
-                    0x40 => {
-                        //FIXME: $OJECT_ID
-                        todo!("$OJECT_ID")
-                    }
-                    0x50 => {
-                        //FIXME: Read $SECURITY_DEXCRIPTOR
-                        todo!("$SECURITY_DEXCRIPTOR")
-                    }
-                    0x60 => {
-                        //FIXME: $VOLUMNE_NAME
-                        todo!("$VOLUMNE_NAME")
-                    }
-                    0x70 => {
-                        //FIXME: $VOLUMNE_INFORMATION
-                        todo!("$VOLUMNE_INFORMATION")
+                        attributes.push((attribute_header, MftAttribute::FileName(file_name)));
                     }
                     0x80 => {
-                        //FIXME: $DATA
-                        eprintln!(
-                            "Ignored attribute_header: {:#?} of type {:#02x}",
-                            attribute_header, common_header.attribute_type
-                        );
-                        todo!("$DATA")
-                    }
-                    0x90 => {
-                        //FIXME: $INDEX_ROOT
-                        todo!("$INDEX_ROOT")
-                    }
-                    0xA0 => {
-                        //FIXME: $INDEX_ALLOCATION
-                        todo!("$INDEX_ALLOCATION")
-                    }
-                    0xB0 => {
-                        //FIXME: $BITMAP
-                        todo!("$BITMAP")
-                    }
-                    0xC0 => {
-                        //FIXME: $REPARSE_POINT
-                        todo!("$REPARSE_POINT")
-                    }
-                    0xD0 => {
-                        //FIXME: $EA_INFORMATION
-                        todo!("$EA_INFORMATION")
-                    }
-                    0xE0 => {
-                        //FIXME: $EA
-                        todo!("$EA")
-                    }
-                    0xF0 => {
-                        //FIXME: $PROPERTY_SET
-                        todo!("$PROPERTY_SET")
-                    }
-                    0x100 => {
-                        //FIXME: $LOGGED_UTILITY_STREAM
-                        todo!("$LOGGED_UTILITY_STREAM")
+                        if ignore_data_attribute {
+                            break;
+                        }
+                        let datarun = stream.read::<DataRun>()?;
+                        attributes.push((attribute_header, MftAttribute::Data(datarun)));
                     }
                     _ => {
-                        eprintln!(
-                            "Ignored attribute_header: {:#?} of type {:#02x}",
-                            attribute_header, common_header.attribute_type
-                        );
-                        starting_offset += mft_file_descriptor.space_allocated as u64;
                         break;
                     }
                 }
-                attribute_offset += common_header.length as u64;
+                attribute_offset += length as u64;
             }
-            // let attribute_offset =
-            //     (mft_lba * SECTOR_SIZE as u64) + mft_file_descriptor.offset_fist_attribute as u64;
-            // stream.jump_to_byte(attribute_offset)?;
-            // println!("Here: {}", attribute_offset);
-            // let attribute_header = stream.read::<AttributeHeader>()?;
-            // println!("attribute_header: {:#?}", attribute_header);
-
-            // let standard_information = stream.read::<StandardInformation>()?;
-            // println!("Standard Info: {:#?}", standard_information);
-            // println!(
-            //     "Unix Epoch: {}",
-            //     (standard_information.datetime_file_creation - 116444736000000000) / 10000000
-            // );
-
-            // if let AttributeHeader::ResidentNoName { common_header, resident_header } = attribute_header {
-            //     stream.jump_to_byte(attribute_offset + common_header.length as u64)?;
-            //     let next_attribute_header = stream.read::<AttributeHeader>()?;
-            //     println!("Next Attribute Header: {:#?}", next_attribute_header);
-            //     // Increment by attribute_offset
-            //     stream.jump_to_byte(attribute_offset + common_header.length as u64 + resident_header.attribute_offset as u64)?;
-            //     let file_name = stream.read::<FileName>()?;
-            //     println!("file_name: {:#?}", file_name);
-            //     println!("Next header: {:#?}", stream.read::<AttributeHeader>()?);
-            //     let x = stream.read_until(0x00)?;
-            //     // Discard padding to byte align the position
-            //     let _ = stream.read_byte_array::<3>()?;
-            //     // TODO: <356929856> Read the dataruns, stopping at 0x00 0x00 0x00
-            //     println!("Data Runs: {:#?}", x);
-            //     println!("Next header3: {:#?}", stream.read::<AttributeHeader>()?);
-            //     println!("Jump: {:#?}", stream.get_reader().stream_position());
-            //     let x = stream.read_until(0x00)?;
-            //     println!("Data Runs: {:#?}", x);
-            // }
-        } else {
-            eprintln!("Bad file signature found in MFT file descriptor.");
-            break;
+        }
+        b"BAAD" => {
+            todo!("BAAD")
+        }
+        _ => {
+            // println!("Unknown signature: {:#?}",stream.get_reader().stream_position());
+            return Ok(None);
         }
     }
-    println!("Offset: {:#?}", stream.get_reader().stream_position());
-    for file_name in file_name_attrs {
-        println!("- {}", file_name.name);
-    }
 
-    Ok(())
+    Ok(Some(MftFileRecord {
+        file_descriptor: mft_file_descriptor,
+        attributes,
+    }))
 }
 
-// struct AttributeParseError;
+// https://sabercomlogica.com/en/ntfs-resident-and-no-named-attributes/
+fn parse_mft(stream: &mut ByteStream, mft_lba: u64, mft_record_size: u32) -> io::Result<()> {
+    println!("LBA: {}", mft_lba);
+    let starting_offset = mft_lba * SECTOR_SIZE as u64;
+    let mut offset = starting_offset;
+    // The record in the MFT that describes the MFT
+    let mft = parse_mft_file_record(stream, starting_offset, false)?
+        .expect("Expected MFT file record to exist.");
+    offset += 1024;
+    let mft_data_attribute = mft
+        .attributes
+        .into_iter()
+        .find(|attribute| match attribute.1 {
+            MftAttribute::Data(_) => true,
+            _ => false,
+        })
+        .map(|attribute| attribute.0);
 
-// impl fmt::Display for AttributeParseError {
-//     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-//         write!(f, "Error parsing attribute, unknown attribute type")
-//     }
-// }
+    match mft_data_attribute {
+        Some(record) => {
+            let mut records: Vec<MftFileRecord> = Vec::new();
+            let allocation_size = record
+                .file_allocation_size()
+                .expect("No file allocation size.");
+            while offset < starting_offset + allocation_size {
 
-// fn parse_attribute_type() -> Result<(), > {
-
-// }
+                match parse_mft_file_record(stream, offset, true)? {
+                    Some(record) => records.push(record),
+                    None => {}
+                }
+                println!("Record len: {}", records.len());
+                offset += mft_record_size as u64;
+            }
+            for record in records {
+                let attrib_opt = record.attributes.into_iter().find(|attribute| attribute.0.attribute_type() == 0x30).map(|attribute| attribute.1);
+                if let Some(attrib) = attrib_opt {
+                    match attrib {
+                        MftAttribute::FileName(file_name) => println!(" - {}", file_name.name),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        None => {
+            eprintln!("Expected MFT file record to have a $DATA attribute.")
+        }
+    }
+    Ok(())
+}
 
 #[test]
 fn datarun_test() {
     // let datarun: [u8; 8] = [0x21, 0x18, 0x34, 0x56, 0x00, 0x00, 0x00, 0x00];
     // let datarun: [u8; 8] = [0x31, 0x01, 0x41, 0x00, 0x01, 0x00, 0x00, 0x00];
-    let datarun: [u8; 8] = [0x31, 0x40, 0x55, 0x4f, 0x01, 0x00, 0x00, 0x00];
+    let datarun: [u8; 8] = [128, 0x0, 0x0, 0x0, 80, 0x00, 0x00, 0x00];
     //356864000
     //356929536
     let mut length: u64 = 0;
@@ -706,5 +732,4 @@ fn datarun_test() {
 
     println!("Length: {:#04x}", length);
     println!("Offset: {:#04x}", offset);
-
 }

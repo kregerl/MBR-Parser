@@ -1,9 +1,9 @@
 use crate::mbr::parse_mbr;
 use clap::Parser;
 use gpt::{display_gpt, parse_gpt};
-use mbr::{display_mbr};
+use mbr::display_mbr;
 use mft::parse_pbr;
-use std::{path::Path, fs::File, io::Read};
+use std::{fs::File, io::Read, path::Path};
 
 mod bytestream;
 mod gpt;
@@ -30,7 +30,18 @@ fn main() {
                 let partition_table = parse_gpt(path);
                 match partition_table {
                     Ok(partition_table_entries) => {
-                        display_gpt(partition_table_entries);
+                        if args.extract_mft {
+                            let ntfs_partition = partition_table_entries.into_iter().find(|entry| {
+                                entry.get_partition_type_guid()
+                                    == "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7"
+                            });
+                            match ntfs_partition {
+                                Some(partition) => parse_pbr(path, partition.starting_lba()).unwrap(),
+                                None => eprintln!("Could not find a `Microsoft basic data` partition."),
+                            }
+                        } else {
+                            display_gpt(partition_table_entries);
+                        }
                     }
                     Err(e) => eprintln!("Error parsing GPT: {}", e),
                 }
@@ -38,7 +49,7 @@ fn main() {
                 if args.extract_mft {
                     let first_child = root.children.unwrap();
                     let first_partition = first_child.get(0).unwrap();
-                    parse_pbr(path, first_partition).unwrap();
+                    parse_pbr(path, first_partition.starting_lba() as u64).unwrap();
                 } else {
                     display_mbr(root, show_chs);
                 }
@@ -50,7 +61,7 @@ fn main() {
 
 #[test]
 pub fn test_open_drive() {
-    use std::fs::{OpenOptions};
+    use std::fs::OpenOptions;
 
     let path = Path::new("\\\\.\\PhysicalDrive0");
     let mut f = OpenOptions::new().read(true).open(path).unwrap();

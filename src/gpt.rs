@@ -119,7 +119,10 @@ impl Readable for GptHeader {
         let revision_buffer = reader.read_byte_array::<4>()?;
 
         Ok(Self {
-            efi_part: String::from_utf8(efi_part_buffer.to_vec()).unwrap().trim().into(),
+            efi_part: String::from_utf8(efi_part_buffer.to_vec())
+                .unwrap()
+                .trim()
+                .into(),
             revision: revision_buffer,
             header_size: reader.read()?,
             crc32: reader.read()?,
@@ -171,6 +174,14 @@ impl Readable for GptPartitionTableEntry {
 }
 
 impl GptPartitionTableEntry {
+    pub fn get_partition_type_guid(&self) -> String {
+        self.partition_type_guid.to_string()
+    }
+
+    pub fn starting_lba(&self) -> u64 {
+        self.starting_lba
+    }
+
     fn is_empty(&self) -> bool {
         self.starting_lba == 0
             && self.ending_lba == 0
