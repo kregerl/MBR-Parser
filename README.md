@@ -30,6 +30,39 @@ loucas:~$ parttable gpt_test.dd
 +---------------------+-------------------+---------------+------------+----------------------+
 | 32768               | 2093055           | 2060288       | 1006       | Microsoft basic data |
 +---------------------+-------------------+---------------+------------+----------------------+
+
+loucas:~$ parttable mbr_test.dd --extract-mft
+ - $MFTMirr
+ - $LogFile
+ - $Volume
+ - $AttrDef
+ - .
+ - $Bitmap
+ - $Boot
+ - $BadClus
+ - $Secure
+ - $UpCase
+ - $Extend
+ - $Quota
+ - $ObjId
+ - $Reparse
+ - $RmMetadata
+ - $Repair
+ - $Deleted
+ - $TxfLog
+ - $Txf
+ - $Tops
+ - $TxfLog.blf
+ - $TxfLogContainer00000000000000000001
+ - $TxfLogContainer00000000000000000002
+ - System Volume Information
+ - WPSettings.dat
+ - tracking.log
+ - $RECYCLE.BIN
+ - S-1-5-21-4215114664-1519948314-2148250071-1001
+ - desktop.ini
+ - IndexerVolumeGuid
+ - MSIf6798.tmp
 ```
 
 ## Usage 
@@ -40,9 +73,14 @@ Arguments:
   <IMAGE_PATH>  
 
 Options:
-      --show-chs  
-  -h, --help      Print help
+      --show-chs     
+      --extract-mft  
+  -h, --help         Print help
 ```
+### Extract MFT
+The option `extract-mft` can be used to read the file names from NTFS partitions regardless of partitioning scheme.  
+The parser will only extract $STANDARD_INFORMATION and $FILE_NAME attributes for most MFT file records since that is all thats needed to attempt [timestomping](https://attack.mitre.org/techniques/T1070/006/) for a given file.
+The $DATA attribute is only extracted for the $MFT file entry so the MFT's size can be known.
 
 ## Install
 Install the [debian package](https://github.com/kregerl/parttable/releases/latest) or compile using cargo.

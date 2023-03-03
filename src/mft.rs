@@ -654,7 +654,6 @@ fn parse_mft_file_record(
 
 // https://sabercomlogica.com/en/ntfs-resident-and-no-named-attributes/
 fn parse_mft(stream: &mut ByteStream, mft_lba: u64, mft_record_size: u32) -> io::Result<()> {
-    println!("LBA: {}", mft_lba);
     let starting_offset = mft_lba * SECTOR_SIZE as u64;
     let mut offset = starting_offset;
     // The record in the MFT that describes the MFT
@@ -682,7 +681,6 @@ fn parse_mft(stream: &mut ByteStream, mft_lba: u64, mft_record_size: u32) -> io:
                     Some(record) => records.push(record),
                     None => {}
                 }
-                println!("Record len: {}", records.len());
                 offset += mft_record_size as u64;
             }
             for record in records {
