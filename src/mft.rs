@@ -325,8 +325,7 @@ impl Readable for AttributeHeader {
                 // If is is named, read the name
                 let attribute_name_bytes =
                     reader.read_raw(common_attribute_header.name_length as usize * 2)?;
-                let name = interpret_bytes_as_utf16(&attribute_name_bytes)
-                    .expect("Invalid utf16 bytes in attribute header.");
+                let name = interpret_bytes_as_utf16(&attribute_name_bytes).unwrap_or("".into());
                 AttributeHeader::NonResidentNamed {
                     common_header: common_attribute_header,
                     non_resident_header: non_resident_attribute_header,
