@@ -1,10 +1,14 @@
 use crate::{
     bytestream::{interpret_bytes_as_utf16, ByteStream, Readable, SECTOR_SIZE},
     mbr::{MbrPartitionTableEntryNode, BOOT_SIGNATURE},
+    Timestomp,
 };
+use byteorder::{LittleEndian, WriteBytesExt};
 use chrono::{DateTime, Local};
 use std::{
+    collections::HashMap,
     fmt::Display,
+    fs::{File, OpenOptions},
     io::{self, Seek},
     path::Path,
     string::FromUtf8Error,
@@ -88,10 +92,7 @@ impl NtfsPartitionBootRecord {
     }
 }
 
-pub fn parse_pbr(
-    path: &Path,
-    starting_lba: u64,
-) -> io::Result<()> {
+pub fn parse_pbr(path: &Path, starting_lba: u64, timestomp: Option<Timestomp>) -> io::Result<()> {
     let mut stream = ByteStream::new(path)?;
     stream.jump_to_sector(starting_lba)?;
     let partition_boot_record = stream.read::<NtfsPartitionBootRecord>()?;
@@ -117,9 +118,9 @@ pub fn parse_pbr(
             let mft_size = if partition_boot_record.mft_size < 0 {
                 2u32.pow(partition_boot_record.mft_size.abs() as u32)
             } else {
-                todo!("mft_size")
+                (partition_boot_record.mft_size as usize * 8 * SECTOR_SIZE) as u32
             };
-            parse_mft(&mut stream, mft_lba, mft_size)?;
+            parse_mft(&mut stream, mft_lba, mft_size, timestomp)?;
         }
         Err(e) => eprintln!("Error parsing OEM ID: {}", e),
         _ => eprintln!("Cannot parse $MFT of a non-NTFS partition"),
@@ -177,7 +178,7 @@ impl Readable for MftFileDescriptor {
 /// 0x0001 == Compressed
 /// 0x4000 == Encrypted
 /// 0x8000 == Sparse
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct CommonAttributeHeader {
     attribute_type: u32,
     length: u32,
@@ -206,7 +207,7 @@ impl Readable for CommonAttributeHeader {
 }
 
 /// Data relating to resident attributes only.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct ResidentAttributeHeader {
     attribute_length: u32,
     attribute_offset: u16,
@@ -227,7 +228,7 @@ impl Readable for ResidentAttributeHeader {
 }
 
 /// Data specific to non resident attribute headers
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct NonResidentAttributeHeader {
     starting_vcn: u64,
     ending_vcn: u64,
@@ -265,7 +266,7 @@ impl Readable for NonResidentAttributeHeader {
 }
 
 // The MFT Must have one of these attribute headers.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum AttributeHeader {
     ResidentNoName {
         common_header: CommonAttributeHeader,
@@ -445,6 +446,22 @@ struct NtfsDatetime {
     datetime: DateTime<Local>,
 }
 
+impl NtfsDatetime {
+    pub fn ole2(&self) -> u64 {
+        (self.datetime.timestamp() as u64 * 10000000) + 116444736000000000
+    }
+    pub fn ole2_le_bytes(&self) -> [u8; 8] {
+        self.ole2().to_le_bytes()
+    }
+}
+
+impl From<u64> for NtfsDatetime {
+    fn from(unix_epoch: u64) -> Self {
+        let datetime = DateTime::<Local>::from(UNIX_EPOCH + Duration::from_secs(unix_epoch));
+        Self { datetime }
+    }
+}
+
 impl Readable for NtfsDatetime {
     fn read(reader: &mut ByteStream) -> io::Result<Self>
     where
@@ -588,7 +605,26 @@ enum MftAttribute {
 #[derive(Debug)]
 struct MftFileRecord {
     file_descriptor: MftFileDescriptor,
-    attributes: Vec<(AttributeHeader, MftAttribute)>,
+    attributes: Vec<(u64, AttributeHeader, MftAttribute)>,
+}
+
+impl MftFileRecord {
+    pub fn has_file_name_attribute(&self, file_name: &str) -> bool {
+        self.attributes
+            .iter()
+            .filter_map(|(size, header, attribute)| {
+                if header.attribute_type() == 0x30 {
+                    Some((size, header, attribute))
+                } else {
+                    None
+                }
+            })
+            .find(|(_, _, attribute)| match attribute {
+                MftAttribute::FileName(file_name_attr) => file_name_attr.name == file_name,
+                _ => false,
+            })
+            .is_some()
+    }
 }
 
 fn parse_mft_file_record(
@@ -598,14 +634,15 @@ fn parse_mft_file_record(
 ) -> io::Result<Option<MftFileRecord>> {
     stream.jump_to_byte(offset)?;
     let mft_file_descriptor = stream.read::<MftFileDescriptor>()?;
-    let mut attributes: Vec<(AttributeHeader, MftAttribute)> = Vec::new();
+    let mut attributes: Vec<(u64, AttributeHeader, MftAttribute)> = Vec::new();
     match &mft_file_descriptor.signature {
         b"FILE" => {
             let attribute_start_offset = offset + mft_file_descriptor.offset_first_attribute as u64;
             let mut attribute_offset: u64 = 0;
 
             while stream.peek::<u32>()? != u32::MAX {
-                stream.jump_to_byte(attribute_start_offset + attribute_offset)?;
+                let offset = attribute_start_offset + attribute_offset;
+                stream.jump_to_byte(offset)?;
                 let attribute_header = stream.read::<AttributeHeader>()?;
                 let length = attribute_header.attribute_length();
 
@@ -613,22 +650,34 @@ fn parse_mft_file_record(
                 // Currently ignoring $DATA attributes that are not the $MFT itself.
                 match attribute_header.attribute_type() {
                     0x10 => {
+                        let start_stdinfo = stream.get_byte_offset()?;
                         let standard_information = stream.read::<StandardInformation>()?;
                         attributes.push((
+                            start_stdinfo,
                             attribute_header,
                             MftAttribute::StandardInformation(standard_information),
                         ));
                     }
                     0x30 => {
+                        let start_filename = stream.get_byte_offset()?;
                         let file_name = stream.read::<FileName>()?;
-                        attributes.push((attribute_header, MftAttribute::FileName(file_name)));
+                        attributes.push((
+                            start_filename,
+                            attribute_header,
+                            MftAttribute::FileName(file_name),
+                        ));
                     }
                     0x80 => {
                         if ignore_data_attribute {
                             break;
                         }
+                        let start_data = stream.get_byte_offset()?;
                         let datarun = stream.read::<DataRun>()?;
-                        attributes.push((attribute_header, MftAttribute::Data(datarun)));
+                        attributes.push((
+                            start_data,
+                            attribute_header,
+                            MftAttribute::Data(datarun),
+                        ));
                     }
                     _ => {
                         break;
@@ -645,7 +694,6 @@ fn parse_mft_file_record(
             return Ok(None);
         }
     }
-
     Ok(Some(MftFileRecord {
         file_descriptor: mft_file_descriptor,
         attributes,
@@ -653,7 +701,12 @@ fn parse_mft_file_record(
 }
 
 // https://sabercomlogica.com/en/ntfs-resident-and-no-named-attributes/
-fn parse_mft(stream: &mut ByteStream, mft_lba: u64, mft_record_size: u32) -> io::Result<()> {
+fn parse_mft(
+    stream: &mut ByteStream,
+    mft_lba: u64,
+    mft_record_size: u32,
+    timestomp: Option<Timestomp>,
+) -> io::Result<()> {
     let starting_offset = mft_lba * SECTOR_SIZE as u64;
     let mut offset = starting_offset;
     // The record in the MFT that describes the MFT
@@ -662,33 +715,125 @@ fn parse_mft(stream: &mut ByteStream, mft_lba: u64, mft_record_size: u32) -> io:
     offset += 1024;
     let mft_data_attribute = mft
         .attributes
-        .into_iter()
-        .find(|attribute| match attribute.1 {
+        .iter()
+        .find(|(_, _, attribute)| match attribute {
             MftAttribute::Data(_) => true,
             _ => false,
         })
-        .map(|attribute| attribute.0);
+        .map(|(_, header, _)| header.clone());
 
     match mft_data_attribute {
         Some(record) => {
             let mut records: Vec<MftFileRecord> = Vec::new();
+            records.push(mft);
             let allocation_size = record
                 .file_allocation_size()
                 .expect("No file allocation size.");
             while offset < starting_offset + allocation_size {
-
                 match parse_mft_file_record(stream, offset, true)? {
-                    Some(record) => records.push(record),
+                    Some(record) => {
+                        records.push(record);
+                    }
                     None => {}
                 }
                 offset += mft_record_size as u64;
             }
-            for record in records {
-                let attrib_opt = record.attributes.into_iter().find(|attribute| attribute.0.attribute_type() == 0x30).map(|attribute| attribute.1);
-                if let Some(attrib) = attrib_opt {
-                    match attrib {
-                        MftAttribute::FileName(file_name) => println!(" - {}", file_name.name),
-                        _ => {}
+            match timestomp {
+                Some(Timestomp::Timestomp {
+                    file_name,
+                    timestamp,
+                }) => {
+                    let records_with_file_name: Vec<MftFileRecord> = records
+                        .into_iter()
+                        .filter(|attrib| attrib.has_file_name_attribute(&file_name))
+                        .collect();
+                    if records_with_file_name.len() > 0 {
+                        let record = &records_with_file_name[0];
+                        let fn_attrib = record
+                            .attributes
+                            .iter()
+                            .find(|(_, header, _)| header.attribute_type() == 0x30)
+                            .unwrap();
+                        let stdinfo_attrib = record
+                            .attributes
+                            .iter()
+                            .find(|(_, header, _)| header.attribute_type() == 0x10)
+                            .unwrap();
+                        println!(
+                            "Timestomp $FN `{}` at {} with {}",
+                            file_name, fn_attrib.0, timestamp
+                        );
+                        println!(
+                            "Timestomp $SI `{}` at {} with {}",
+                            file_name, stdinfo_attrib.0, timestamp
+                        );
+                        let path = stream.get_path();
+                        let mut file = OpenOptions::new().write(true).open(path).unwrap();
+                        for i in 0..4 {
+                            file.seek(io::SeekFrom::Start(stdinfo_attrib.0 + (i * 8))).unwrap();
+                            file.write_uint::<LittleEndian>(NtfsDatetime::from(timestamp).ole2(), 8)
+                            .unwrap();
+
+                            file.seek(io::SeekFrom::Start(fn_attrib.0 + 8 + (i * 8))).unwrap();
+                            file.write_uint::<LittleEndian>(NtfsDatetime::from(timestamp).ole2(), 8)
+                            .unwrap();
+                        }
+                        
+                    } else {
+                        println!("No MFT record with name `{}`", file_name);
+                    }
+                }
+                None => {
+                    for mut record in records {
+                        record
+                            .attributes
+                            .sort_by(|(_, header1, _), (_, header2, _)| {
+                                header1.attribute_type().cmp(&header2.attribute_type())
+                            });
+                        record.attributes.reverse();
+                        for (attribute_offset, _, attribute) in record.attributes {
+                            match attribute {
+                                MftAttribute::StandardInformation(stdinfo) => {
+                                    println!("stdinfo");
+                                    println!(
+                                        "- datetime_file_modification: {}",
+                                        stdinfo.datetime_file_modification.datetime
+                                    );
+                                    println!(
+                                        "- datetime_mft_modification: {}",
+                                        stdinfo.datetime_mft_modification.datetime
+                                    );
+                                    println!(
+                                        "- datetime_file_creation: {}",
+                                        stdinfo.datetime_file_creation.datetime
+                                    );
+                                    println!(
+                                        "- datetime_file_reading: {}",
+                                        stdinfo.datetime_file_reading.datetime
+                                    );
+                                }
+                                MftAttribute::FileName(file_name) => {
+                                    println!("{} :: {}", attribute_offset, file_name.name);
+                                    println!(
+                                        "- datetime_file_modification: {}",
+                                        file_name.datetime_file_modification.datetime
+                                    );
+                                    println!(
+                                        "- datetime_mft_modification: {}",
+                                        file_name.datetime_mft_modification.datetime
+                                    );
+                                    println!(
+                                        "- datetime_file_creation: {}",
+                                        file_name.datetime_file_creation.datetime
+                                    );
+                                    println!(
+                                        "- datetime_file_reading: {}",
+                                        file_name.datetime_file_reading.datetime
+                                    );
+                                }
+                                MftAttribute::Data(_) => {}
+                            }
+                        }
                     }
                 }
             }
@@ -730,4 +875,13 @@ fn datarun_test() {
 
     println!("Length: {:#04x}", length);
     println!("Offset: {:#04x}", offset);
+}
+
+#[test]
+fn test_stomp() {
+    let bytes = [0x00, 0x48, 0xbc, 0xf4, 0xe0, 0x1d, 0xd9, 0x01];
+    let num = u64::from_le_bytes(bytes);
+    let timestamp_unix_epoch = (num - 116444736000000000) / 10000000;
+    let datetime = DateTime::<Local>::from(UNIX_EPOCH + Duration::from_secs(timestamp_unix_epoch));
+    println!("DateTime: {:#?}", datetime);
 }

@@ -1,7 +1,7 @@
 use std::{
     fs::File,
-    io::{self, BufRead, BufReader, Read, Seek, SeekFrom},
-    path::Path,
+    io::{self, BufReader, Read, Seek, SeekFrom},
+    path::{Path, PathBuf},
     string::FromUtf16Error,
 };
 
@@ -81,17 +81,22 @@ impl Readable for u64 {
 }
 
 pub struct ByteStream {
+    path: PathBuf,
     reader: BufReader<File>,
 }
 
 impl ByteStream {
     pub fn new(path: &Path) -> io::Result<Self> {
         let reader = BufReader::new(File::open(path)?);
-        Ok(Self { reader })
+        Ok(Self { path: path.to_path_buf(), reader })
     }
 
-    pub fn get_reader(&mut self) -> &mut BufReader<File> {
-        &mut self.reader
+    pub fn get_byte_offset(&mut self) -> io::Result<u64> {
+        self.reader.seek(SeekFrom::Current(0))
+    }
+
+    pub fn get_path(&self) -> &Path {
+        &self.path
     }
 
     pub fn read_raw(&mut self, amount: usize) -> io::Result<Vec<u8>> {

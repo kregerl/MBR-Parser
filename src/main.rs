@@ -1,5 +1,5 @@
 use crate::mbr::parse_mbr;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use gpt::{display_gpt, parse_gpt};
 use mbr::display_mbr;
 use mft::parse_pbr;
@@ -17,6 +17,19 @@ struct Arguments {
     show_chs: bool,
     #[arg(long)]
     extract_mft: bool,
+    #[command(subcommand)]
+    timestomp: Option<Timestomp>
+}
+
+#[derive(Debug, Subcommand)]
+pub enum Timestomp {
+    /// Timestomp `file_name` with the `timestamp` 
+    Timestomp {
+        /// Name of the file entry in the MFT
+        file_name: String,
+        /// Unix epoch timestamp to timestomp with
+        timestamp: u64
+    }
 }
 
 fn main() {
@@ -36,7 +49,7 @@ fn main() {
                                     == "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7"
                             });
                             match ntfs_partition {
-                                Some(partition) => parse_pbr(path, partition.starting_lba()).unwrap(),
+                                Some(partition) => parse_pbr(path, partition.starting_lba(), args.timestomp).unwrap(),
                                 None => eprintln!("Could not find a `Microsoft basic data` partition."),
                             }
                         } else {
@@ -49,7 +62,7 @@ fn main() {
                 if args.extract_mft {
                     let first_child = root.children.unwrap();
                     let first_partition = first_child.get(0).unwrap();
-                    parse_pbr(path, first_partition.starting_lba() as u64).unwrap();
+                    parse_pbr(path, first_partition.starting_lba() as u64, args.timestomp).unwrap();
                 } else {
                     display_mbr(root, show_chs);
                 }
