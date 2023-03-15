@@ -2,8 +2,11 @@ use crate::mbr::parse_mbr;
 use clap::{Parser, Subcommand};
 use gpt::{display_gpt, parse_gpt};
 use mbr::display_mbr;
-use mft::parse_pbr;
-use std::{fs::File, io::Read, path::Path};
+use mft::{display_mft, parse_pbr, timestomp_mft};
+use std::path::{Path, PathBuf};
+
+#[cfg(test)]
+use std::io::Read;
 
 mod bytestream;
 mod gpt;
@@ -18,57 +21,74 @@ struct Arguments {
     #[arg(long)]
     extract_mft: bool,
     #[command(subcommand)]
-    timestomp: Option<Timestomp>
+    timestomp: Option<Timestomp>,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum Timestomp {
-    /// Timestomp `file_name` with the `timestamp` 
+    /// Timestomp `file_name` with the `timestamp`
     Timestomp {
         /// Name of the file entry in the MFT
         file_name: String,
         /// Unix epoch timestamp to timestomp with
-        timestamp: u64
-    }
+        timestamp: u64,
+    },
 }
 
 fn main() {
     let args = Arguments::parse();
-    let show_chs = args.show_chs;
     let path = Path::new(&args.image_path);
     let mbr = parse_mbr(path);
-    match mbr {
-        Ok(root) => {
-            if root.is_gpt() {
-                let partition_table = parse_gpt(path);
-                match partition_table {
-                    Ok(partition_table_entries) => {
-                        if args.extract_mft {
-                            let ntfs_partition = partition_table_entries.into_iter().find(|entry| {
-                                entry.get_partition_type_guid()
-                                    == "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7"
-                            });
-                            match ntfs_partition {
-                                Some(partition) => parse_pbr(path, partition.starting_lba(), args.timestomp).unwrap(),
-                                None => eprintln!("Could not find a `Microsoft basic data` partition."),
-                            }
-                        } else {
-                            display_gpt(partition_table_entries);
-                        }
-                    }
-                    Err(e) => eprintln!("Error parsing GPT: {}", e),
-                }
+    let mbr_node = match mbr {
+        Ok(root_node) => root_node,
+        Err(error) => panic!("Error parsing MBR: {}", error),
+    };
+
+    if mbr_node.is_gpt() {
+        let partition_table = match parse_gpt(path) {
+            Ok(partition_table) => partition_table,
+            Err(error) => panic!("Error parsing GPT: {}", error),
+        };
+
+        if args.extract_mft || args.timestomp.is_some() {
+            let ntfs_partition = partition_table.into_iter().find(|entry| {
+                entry.get_partition_type_guid() == "EBD0A0A2-B9E5-4433-87C0-68B6B72699C7"
+            });
+            let mft_records = match ntfs_partition {
+                Some(partition) => parse_pbr(path, partition.starting_lba()).unwrap(),
+                None => panic!("Could not find a `Microsoft basic data` partition."),
+            };
+
+            if args.extract_mft {
+                display_mft(mft_records);
             } else {
-                if args.extract_mft {
-                    let first_child = root.children.unwrap();
-                    let first_partition = first_child.get(0).unwrap();
-                    parse_pbr(path, first_partition.starting_lba() as u64, args.timestomp).unwrap();
-                } else {
-                    display_mbr(root, show_chs);
-                }
+                timestomp_mft(
+                    &PathBuf::from(args.image_path),
+                    mft_records,
+                    args.timestomp.unwrap(),
+                );
             }
+        } else {
+            display_gpt(partition_table);
         }
-        Err(e) => eprintln!("Parse Error: {}", e),
+    } else {
+        if args.extract_mft || args.timestomp.is_some() {
+            let first_child = mbr_node.children.unwrap();
+            let first_partition = first_child.get(0).unwrap();
+            let mft_records = parse_pbr(path, first_partition.starting_lba() as u64).unwrap();
+
+            if args.extract_mft {
+                display_mft(mft_records);
+            } else {
+                timestomp_mft(
+                    &PathBuf::from(args.image_path),
+                    mft_records,
+                    args.timestomp.unwrap(),
+                );
+            }
+        } else {
+            display_mbr(mbr_node, args.show_chs);
+        }
     }
 }
 
