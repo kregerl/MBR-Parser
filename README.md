@@ -32,49 +32,33 @@ loucas:~$ parttable gpt_test.dd
 +---------------------+-------------------+---------------+------------+----------------------+
 
 loucas:~$ parttable mbr_test.dd --extract-mft
- - $MFTMirr
- - $LogFile
- - $Volume
- - $AttrDef
- - .
- - $Bitmap
- - $Boot
- - $BadClus
- - $Secure
- - $UpCase
- - $Extend
- - $Quota
- - $ObjId
- - $Reparse
- - $RmMetadata
- - $Repair
- - $Deleted
- - $TxfLog
- - $Txf
- - $Tops
- - $TxfLog.blf
- - $TxfLogContainer00000000000000000001
- - $TxfLogContainer00000000000000000002
- - System Volume Information
- - WPSettings.dat
- - tracking.log
- - $RECYCLE.BIN
- - S-1-5-21-4215114664-1519948314-2148250071-1001
- - desktop.ini
- - IndexerVolumeGuid
- - MSIf6798.tmp
+ +-----------+----------------------------+----------------------------+----------------------------+----------------------------+      
+| File Name | $FN Modified               | $FN MFT Modified           | $FN Created                | $FN Read                   |      
++-----------+----------------------------+----------------------------+----------------------------+----------------------------+      
+| $MFT      | 2023-03-02 17:48:33 -05:00 | 2023-03-02 17:48:33 -05:00 | 2023-03-02 17:48:33 -05:00 | 2023-03-02 17:48:33 -05:00 |      
++-----------+----------------------------+----------------------------+----------------------------+----------------------------+      
++-----------------+----------------------------+----------------------------+----------------------------+----------------------------+
+| $SI Byte Offset | $SI Modified               | $SI MFT Modified           | $SI Created                | $SI Read                   |
++-----------------+----------------------------+----------------------------+----------------------------+----------------------------+
+| 356929616       | 2023-03-02 17:48:33 -05:00 | 2023-03-02 17:48:33 -05:00 | 2023-03-02 17:48:33 -05:00 | 2023-03-02 17:48:33 -05:00 |
++-----------------+----------------------------+----------------------------+----------------------------+----------------------------+
+...
 ```
 
 ## Usage 
 ```
-Usage: parttable [OPTIONS] <IMAGE_PATH>
+Usage: parttable.exe [OPTIONS] <IMAGE_PATH> [COMMAND]
+
+Commands:
+  timestomp  Timestomp `file_name` with the `timestamp`
+  help       Print this message or the help of the given subcommand(s)
 
 Arguments:
   <IMAGE_PATH>  
 
 Options:
       --show-chs     
-      --extract-mft  
+      --extract-mft
   -h, --help         Print help
 ```
 ### Extract MFT
