@@ -1,4 +1,5 @@
-use crate::mbr::parse_mbr;
+use crate::{mbr::parse_mbr, apm::parse_apm};
+use apm::is_apm_disk;
 use clap::{Parser, Subcommand};
 use gpt::{display_gpt, parse_gpt};
 use mbr::display_mbr;
@@ -39,6 +40,12 @@ pub enum Timestomp {
 fn main() {
     let args = Arguments::parse();
     let path = Path::new(&args.image_path);
+    if is_apm_disk(&args.image_path).unwrap() {
+        let partitions = parse_apm(&args.image_path).unwrap();
+        println!("partitions: {:#?}", partitions);
+        todo!("Parse apm disk");
+    }
+
     let mbr = parse_mbr(path);
     let mbr_node = match mbr {
         Ok(root_node) => root_node,
