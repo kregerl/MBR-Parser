@@ -11,6 +11,7 @@ use std::io::Read;
 mod bytestream;
 mod gpt;
 mod mbr;
+mod apm;
 mod mft;
 
 #[derive(Debug, Parser)]

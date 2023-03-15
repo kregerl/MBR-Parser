@@ -134,6 +134,11 @@ impl ByteStream {
         T::read(self)
     }
 
+    pub fn read_array<T, const S: usize>(&mut self) -> io::Result<[T; S]>  where T: Readable + Copy {
+        let buffer = [T::read(self)?; S];
+        Ok(buffer)
+    }
+
     // Reads S bytes from the stream
     pub fn read_byte_array<const S: usize>(&mut self) -> io::Result<[u8; S]> {
         let mut buffer = [0u8; S];
