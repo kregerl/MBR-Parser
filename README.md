@@ -85,7 +85,7 @@ The parser will only extract $STANDARD_INFORMATION and $FILE_NAME attributes for
 The $DATA attribute is only extracted for the $MFT file entry so the MFT's size can be known.
 
 ### Timestomping
-To timestomp a file the MFT, the timestomp subcommand can be used as shown below:
+To timestomp a file in the MFT, the timestomp subcommand can be used as shown below:
 ```
 Timestomp `file_name` with the `timestamp`
 
