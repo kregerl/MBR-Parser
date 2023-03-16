@@ -1,16 +1,24 @@
 use std::{
     fs::File,
     io::{self, BufReader, Read, Seek, SeekFrom},
-    path::{Path},
+    path::Path,
     string::FromUtf16Error,
 };
 
-use byteorder::ReadBytesExt;
+use byteorder::{ByteOrder, ReadBytesExt};
 pub const SECTOR_SIZE: usize = 512;
 
+// FIXME: Remove `Readable` impls for numbers and replace with `ReadableEndianess`
 pub trait Readable {
     fn read(reader: &mut ByteStream) -> io::Result<Self>
     where
+        Self: Sized;
+}
+
+pub trait ReadableEndianness {
+    fn read<T>(reader: &mut ByteStream) -> io::Result<Self>
+    where
+        T: ByteOrder,
         Self: Sized;
 }
 
@@ -48,6 +56,16 @@ impl Readable for u16 {
     }
 }
 
+impl ReadableEndianness for u16 {
+    fn read<T>(reader: &mut ByteStream) -> io::Result<Self>
+    where
+        T: ByteOrder,
+        Self: Sized,
+    {
+        reader.reader.read_u16::<T>()
+    }
+}
+
 impl Readable for u32 {
     fn read(reader: &mut ByteStream) -> io::Result<Self>
     where
@@ -61,6 +79,16 @@ impl Readable for u32 {
         {
             reader.reader.read_u32::<byteorder::BigEndian>()
         }
+    }
+}
+
+impl ReadableEndianness for u32 {
+    fn read<T>(reader: &mut ByteStream) -> io::Result<Self>
+    where
+        T: ByteOrder,
+        Self: Sized,
+    {
+        reader.reader.read_u32::<T>()
     }
 }
 
@@ -134,8 +162,24 @@ impl ByteStream {
         T::read(self)
     }
 
+    pub fn read_le<T>(&mut self) -> io::Result<T>
+    where
+        T: ReadableEndianness,
+    {
+        T::read::<byteorder::LittleEndian>(self)
+    }
 
-    pub fn read_array<T, const S: usize>(&mut self) -> io::Result<[T; S]>  where T: Readable + Copy {
+    pub fn read_be<T>(&mut self) -> io::Result<T>
+    where
+        T: ReadableEndianness,
+    {
+        T::read::<byteorder::BigEndian>(self)
+    }
+
+    pub fn read_array<T, const S: usize>(&mut self) -> io::Result<[T; S]>
+    where
+        T: Readable + Copy,
+    {
         let buffer = [T::read(self)?; S];
         Ok(buffer)
     }

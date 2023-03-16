@@ -1,5 +1,7 @@
 use std::{io::{Read, self}, path::Path};
 
+use prettytable::{Table, row};
+
 use crate::bytestream::{Readable, ByteStream};
 
 #[derive(Debug, Copy, Clone)]
@@ -15,9 +17,9 @@ impl Readable for DriverDescriptorEntry {
         Self: Sized,
     {
         Ok(Self {
-            start_lba: reader.read::<u32>()?,
-            size_in_sectors: reader.read::<u16>()?,
-            sys_type: reader.read::<u16>()?,
+            start_lba: reader.read_be::<u32>()?,
+            size_in_sectors: reader.read_be::<u16>()?,
+            sys_type: reader.read_be::<u16>()?,
         })
     }
 }
@@ -25,7 +27,7 @@ impl Readable for DriverDescriptorEntry {
 #[derive(Debug)]
 struct DriverDescriptorMap {
     // 2 bytes
-    signature: String,
+    signature: [u8; 2],
     block_size: u16,
     block_count: u32,
     device_type: u16,
@@ -41,13 +43,13 @@ impl Readable for DriverDescriptorMap {
         Self: Sized,
     {
         Ok(Self {
-            signature: String::from_utf8(reader.read_byte_array::<2>()?.to_vec()).unwrap(),
-            block_size: reader.read::<u16>()?,
-            block_count: reader.read::<u32>()?,
-            device_type: reader.read::<u16>()?,
-            device_id: reader.read::<u16>()?,
-            driver_data: reader.read::<u32>()?,
-            driver_descriptor_count: reader.read::<u16>()?,
+            signature: reader.read_byte_array::<2>()?,
+            block_size: reader.read_be::<u16>()?,
+            block_count: reader.read_be::<u32>()?,
+            device_type: reader.read_be::<u16>()?,
+            device_id: reader.read_be::<u16>()?,
+            driver_data: reader.read_be::<u32>()?,
+            driver_descriptor_count: reader.read_be::<u16>()?,
             driver_descriptor_map: reader.read_array::<DriverDescriptorEntry, 8>()?,
         })
     }
@@ -56,7 +58,9 @@ impl Readable for DriverDescriptorMap {
 pub fn is_apm_disk(path: &str) -> io::Result<bool> {
     let mut stream = ByteStream::new(&Path::new(path))?;
     let driver_descriptor_map = stream.read::<DriverDescriptorMap>()?;
-    Ok(driver_descriptor_map.signature == "ER")
+    // println!("Block Size: {}", driver_descriptor_map.block_size);
+    // println!("Block Count: {}", driver_descriptor_map.block_count);
+    Ok(driver_descriptor_map.signature == *b"ER")
 }
 
 #[derive(Debug)]
@@ -86,23 +90,23 @@ impl Readable for ApmPartitionTable {
         let signature = String::from_utf8(reader.read_byte_array::<2>()?.to_vec()).unwrap();
         // reserved 2
         let _ = reader.read_byte_array::<2>()?;
-        let number_of_partitions = reader.read::<u32>()?;
-        let starting_lba = reader.read::<u32>()?;
-        let size_in_sectors = reader.read::<u32>()?;
+        let number_of_partitions = reader.read_be::<u32>()?;
+        let starting_lba = reader.read_be::<u32>()?;
+        let size_in_sectors = reader.read_be::<u32>()?;
         let partition_name = String::from_utf8(reader.read_byte_array::<32>()?.to_vec()).unwrap();
         let partition_type = String::from_utf8(reader.read_byte_array::<32>()?.to_vec()).unwrap();
-        let starting_lba_of_data = reader.read::<u32>()?;
-        let size_in_sectors_of_date = reader.read::<u32>()?;
-        let partition_status = reader.read::<u32>()?;
-        let starting_lba_boot_code = reader.read::<u32>()?;
-        let size_boot_code = reader.read::<u32>()?;
-        let address_boot_loader = reader.read::<u32>()?;
+        let starting_lba_of_data = reader.read_be::<u32>()?;
+        let size_in_sectors_of_date = reader.read_be::<u32>()?;
+        let partition_status = reader.read_be::<u32>()?;
+        let starting_lba_boot_code = reader.read_be::<u32>()?;
+        let size_boot_code = reader.read_be::<u32>()?;
+        let address_boot_loader = reader.read_be::<u32>()?;
         // reserved 4
         let _ = reader.read_byte_array::<4>()?;
-        let boot_entry_point = reader.read::<u32>()?;
+        let boot_entry_point = reader.read_be::<u32>()?;
         // reserved 4
         let _ = reader.read_byte_array::<4>()?;
-        let checksum = reader.read::<u32>()?;
+        let checksum = reader.read_be::<u32>()?;
         let processor_type = reader.read_byte_array::<16>()?;
         Ok(Self {
             signature,
@@ -126,7 +130,7 @@ impl Readable for ApmPartitionTable {
 
 impl ApmPartitionTable {
     pub fn is_valid_apm_partition_table_entry(&self) -> bool {
-        !self.processor_type.is_empty()
+        self.signature == "PM"
     }
 }
 
@@ -149,9 +153,10 @@ enum ApmPartitionStatus {
 
 pub fn parse_apm(path: &str) -> io::Result<Vec<ApmPartitionTable>> {
     let mut stream = ByteStream::new(&Path::new(path))?;
-    stream.jump_to_sector(1)?;
     let mut partition_tables = Vec::new();
-    loop {
+
+    for i in 1..63 {
+        stream.jump_to_sector(i)?;
         let partition_table = stream.read::<ApmPartitionTable>()?;
         if !partition_table.is_valid_apm_partition_table_entry() {
             break;
@@ -160,4 +165,25 @@ pub fn parse_apm(path: &str) -> io::Result<Vec<ApmPartitionTable>> {
     }
 
     Ok(partition_tables)
+}
+
+pub fn display_apm_partitions(partitions: Vec<ApmPartitionTable>) {
+    let mut table = Table::new();
+    table.add_row(row![
+        "Starting LBA",
+        "Ending LBA",
+        "Size in Sectors",
+        "Partition Name",
+        "Partition Type",
+    ]);
+    for partition in partitions {
+        table.add_row(row![
+            partition.starting_lba,
+            partition.starting_lba + partition.size_in_sectors - 1,
+            partition.size_in_sectors,
+            partition.partition_name,
+            partition.partition_type,
+        ]);
+    }
+    table.printstd();
 }
