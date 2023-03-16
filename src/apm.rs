@@ -72,7 +72,7 @@ pub struct ApmPartitionTable {
     partition_name: String,
     partition_type: String,
     starting_lba_of_data: u32,
-    size_in_sectors_of_date: u32,
+    size_in_sectors_of_data: u32,
     partition_status: u32,
     starting_lba_boot_code: u32,
     size_boot_code: u32,
@@ -96,7 +96,7 @@ impl Readable for ApmPartitionTable {
         let partition_name = String::from_utf8(reader.read_byte_array::<32>()?.to_vec()).unwrap();
         let partition_type = String::from_utf8(reader.read_byte_array::<32>()?.to_vec()).unwrap();
         let starting_lba_of_data = reader.read_be::<u32>()?;
-        let size_in_sectors_of_date = reader.read_be::<u32>()?;
+        let size_in_sectors_of_data = reader.read_be::<u32>()?;
         let partition_status = reader.read_be::<u32>()?;
         let starting_lba_boot_code = reader.read_be::<u32>()?;
         let size_boot_code = reader.read_be::<u32>()?;
@@ -116,7 +116,7 @@ impl Readable for ApmPartitionTable {
             partition_name,
             partition_type,
             starting_lba_of_data,
-            size_in_sectors_of_date,
+            size_in_sectors_of_data,
             partition_status,
             starting_lba_boot_code,
             size_boot_code,
@@ -161,6 +161,7 @@ pub fn parse_apm(path: &str) -> io::Result<Vec<ApmPartitionTable>> {
         if !partition_table.is_valid_apm_partition_table_entry() {
             break;
         }
+        println!("partition_table: {:#?}", partition_table);
         partition_tables.push(partition_table);
     }
 
