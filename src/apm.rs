@@ -2,7 +2,7 @@ use std::{io::{Read, self}, path::Path};
 
 use prettytable::{Table, row};
 
-use crate::bytestream::{Readable, ByteStream};
+use crate::bytestream::{Readable, ByteStream, SECTOR_SIZE};
 
 #[derive(Debug, Copy, Clone)]
 struct DriverDescriptorEntry {
@@ -56,7 +56,7 @@ impl Readable for DriverDescriptorMap {
 }
 
 pub fn is_apm_disk(path: &str) -> io::Result<bool> {
-    let mut stream = ByteStream::new(&Path::new(path))?;
+    let mut stream = ByteStream::new(&Path::new(path), SECTOR_SIZE, 0)?;
     let driver_descriptor_map = stream.read::<DriverDescriptorMap>()?;
     // println!("Block Size: {}", driver_descriptor_map.block_size);
     // println!("Block Count: {}", driver_descriptor_map.block_count);
@@ -152,11 +152,10 @@ enum ApmPartitionStatus {
 }
 
 pub fn parse_apm(path: &str) -> io::Result<Vec<ApmPartitionTable>> {
-    let mut stream = ByteStream::new(&Path::new(path))?;
     let mut partition_tables = Vec::new();
 
     for i in 1..63 {
-        stream.jump_to_sector(i)?;
+        let mut stream = ByteStream::new(&Path::new(path), SECTOR_SIZE, i)?;
         let partition_table = stream.read::<ApmPartitionTable>()?;
         if !partition_table.is_valid_apm_partition_table_entry() {
             break;

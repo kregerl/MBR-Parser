@@ -1,6 +1,6 @@
 use std::{
     fs::File,
-    io::{self, BufReader, Read, Seek, SeekFrom},
+    io::{self, BufReader, Read, Seek, SeekFrom, Cursor},
     path::Path,
     string::FromUtf16Error,
 };
@@ -27,7 +27,7 @@ impl Readable for u8 {
     where
         Self: Sized,
     {
-        reader.reader.read_u8()
+        reader.cursor.read_u8()
     }
 }
 
@@ -36,23 +36,7 @@ impl Readable for i8 {
     where
         Self: Sized,
     {
-        reader.reader.read_i8()
-    }
-}
-
-impl Readable for u16 {
-    fn read(reader: &mut ByteStream) -> io::Result<Self>
-    where
-        Self: Sized,
-    {
-        #[cfg(target_endian = "little")]
-        {
-            reader.reader.read_u16::<byteorder::LittleEndian>()
-        }
-        #[cfg(target_endian = "big")]
-        {
-            reader.reader.read_u16::<byteorder::BigEndian>()
-        }
+        reader.cursor.read_i8()
     }
 }
 
@@ -62,23 +46,7 @@ impl ReadableEndianness for u16 {
         T: ByteOrder,
         Self: Sized,
     {
-        reader.reader.read_u16::<T>()
-    }
-}
-
-impl Readable for u32 {
-    fn read(reader: &mut ByteStream) -> io::Result<Self>
-    where
-        Self: Sized,
-    {
-        #[cfg(target_endian = "little")]
-        {
-            reader.reader.read_u32::<byteorder::LittleEndian>()
-        }
-        #[cfg(target_endian = "big")]
-        {
-            reader.reader.read_u32::<byteorder::BigEndian>()
-        }
+        reader.cursor.read_u16::<T>()
     }
 }
 
@@ -88,55 +56,66 @@ impl ReadableEndianness for u32 {
         T: ByteOrder,
         Self: Sized,
     {
-        reader.reader.read_u32::<T>()
+        reader.cursor.read_u32::<T>()
     }
 }
 
-impl Readable for u64 {
-    fn read(reader: &mut ByteStream) -> io::Result<Self>
+impl ReadableEndianness for u64 {
+    fn read<T>(reader: &mut ByteStream) -> io::Result<Self>
     where
-        Self: Sized,
-    {
-        #[cfg(target_endian = "little")]
-        {
-            reader.reader.read_u64::<byteorder::LittleEndian>()
-        }
-        #[cfg(target_endian = "big")]
-        {
-            reader.reader.read_u64::<byteorder::BigEndian>()
-        }
+        T: ByteOrder,
+        Self: Sized {
+        reader.cursor.read_u64::<T>()
     }
 }
 
 pub struct ByteStream {
     reader: BufReader<File>,
+    cursor: Cursor<Vec<u8>>,
 }
 
 impl ByteStream {
-    pub fn new(path: &Path) -> io::Result<Self> {
-        let reader = BufReader::new(File::open(path)?);
-        Ok(Self { reader })
+    // Offset in sectors
+    pub fn new(path: &Path, size: usize, offset: u64) -> io::Result<Self> {
+        let mut reader = BufReader::new(File::open(path)?);
+        reader.seek(SeekFrom::Start(offset * SECTOR_SIZE as u64))?;
+        let mut buffer = vec![0u8; size];
+        reader.read_exact(&mut buffer)?;
+        Ok(Self { reader, cursor: Cursor::new(buffer) })
+    }
+
+    pub fn from_byte_offset(path: &Path, size: usize, offset: u64) -> io::Result<Self> {
+        let mut reader = BufReader::new(File::open(path)?);
+        let sector_num = offset / SECTOR_SIZE as u64;
+        let byte_offset = offset - (sector_num * SECTOR_SIZE as u64);
+
+        reader.seek(SeekFrom::Start(sector_num * SECTOR_SIZE as u64))?;
+        let mut buffer = vec![0u8; size];
+        reader.read_exact(&mut buffer)?;
+        let mut cursor = Cursor::new(buffer);
+        io::copy(&mut cursor.by_ref().take(byte_offset), &mut io::sink())?;
+        Ok(Self { reader, cursor })
     }
 
     pub fn get_byte_offset(&mut self) -> io::Result<u64> {
-        self.reader.seek(SeekFrom::Current(0))
+        Ok(self.reader.seek(SeekFrom::Current(0))? + self.cursor.position())
     }
 
     pub fn read_raw(&mut self, amount: usize) -> io::Result<Vec<u8>> {
         let mut buffer = vec![0u8; amount];
-        self.reader.read_exact(&mut buffer)?;
+        self.cursor.read_exact(&mut buffer)?;
         Ok(buffer)
     }
 
     /// Reads raw bytes from sectors starting at `from` until `from + amount` without advancing the buffered reader's index.
-    pub fn read_raw_sectors(&mut self, from: usize, amount: usize) -> io::Result<Vec<u8>> {
+    pub fn read_raw_sectors_from_file(&mut self, from: usize, amount: usize) -> io::Result<Vec<u8>> {
         let start = from * SECTOR_SIZE;
         let amt = amount * SECTOR_SIZE;
-        self.read_raw_bytes(start, amt)
+        self.read_raw_bytes_from_file(start, amt)
     }
 
     /// Reads raw bytes starting at `from` until `from + amount` without advancing the buffered reader's index.
-    pub fn read_raw_bytes(&mut self, from: usize, amount: usize) -> io::Result<Vec<u8>> {
+    pub fn read_raw_bytes_from_file(&mut self, from: usize, amount: usize) -> io::Result<Vec<u8>> {
         let current = self.reader.seek(SeekFrom::Current(0))?;
         let mut buffer = vec![0u8; amount];
         let _ = self.reader.seek(SeekFrom::Start(from as u64))?;
@@ -145,13 +124,13 @@ impl ByteStream {
         Ok(buffer)
     }
 
-    pub fn peek<T>(&mut self) -> io::Result<T>
+    pub fn peek_le<T>(&mut self) -> io::Result<T>
     where
-        T: Readable,
+        T: ReadableEndianness,
     {
-        let current_index = self.reader.seek(SeekFrom::Current(0))?;
-        let result = T::read(self)?;
-        let _ = self.reader.seek(SeekFrom::Start(current_index))?;
+        let current_index = self.cursor.seek(SeekFrom::Current(0))?;
+        let result = self.read_le::<T>()?;
+        let _ = self.cursor.seek(SeekFrom::Start(current_index))?;
         Ok(result)
     }
 
@@ -187,18 +166,23 @@ impl ByteStream {
     // Reads S bytes from the stream
     pub fn read_byte_array<const S: usize>(&mut self) -> io::Result<[u8; S]> {
         let mut buffer = [0u8; S];
-        self.reader.read_exact(&mut buffer)?;
+        self.cursor.read_exact(&mut buffer)?;
         Ok(buffer)
     }
 
-    pub fn jump_to_sector(&mut self, amount: u64) -> io::Result<()> {
-        self.jump_to_byte(amount * SECTOR_SIZE as u64)
-    }
-
-    pub fn jump_to_byte(&mut self, amount: u64) -> io::Result<()> {
-        self.reader.seek(SeekFrom::Start(amount))?;
+    pub fn skip_bytes(&mut self, amount: u64) -> io::Result<()> {
+        io::copy(&mut self.cursor.by_ref().take(amount), &mut io::sink())?;
         Ok(())
     }
+
+    // pub fn jump_to_sector(&mut self, amount: u64) -> io::Result<()> {
+    //     self.jump_to_byte(amount * SECTOR_SIZE as u64)
+    // }
+
+    // pub fn jump_to_byte(&mut self, amount: u64) -> io::Result<()> {
+    //     self.reader.seek(SeekFrom::Start(amount))?;
+    //     Ok(())
+    // }
 }
 
 pub fn interpret_bytes_as_utf16(name_bytes: &[u8]) -> Result<String, FromUtf16Error> {
