@@ -525,16 +525,11 @@ impl Readable for FileName {
     where
         Self: Sized,
     {   
-        println!("{:#?}", reader.read_byte_array::<8>()?);
-        println!("datetime_file_creation: {:#?}, reader offset: {:#?}", reader.read_le::<u64>()?, reader.get_byte_offset());
-        println!("datetime_file_modification: {:#?}, reader offset: {:#?}", reader.read_le::<u64>()?, reader.get_byte_offset());
-        println!("datetime_mft_modification: {:#?}, reader offset: {:#?}", reader.read_le::<u64>()?, reader.get_byte_offset());
-        println!("datetime_file_reading: {:#?}, reader offset: {:#?}", reader.read_le::<u64>()?, reader.get_byte_offset());
-        // let reference_to_parent_dir = reader.read_le::<u64>()?;
-        // let datetime_file_creation = reader.read::<NtfsDatetime>()?;
-        // let datetime_file_modification = reader.read::<NtfsDatetime>()?;
-        // let datetime_mft_modification = reader.read::<NtfsDatetime>()?;
-        // let datetime_file_reading = reader.read::<NtfsDatetime>()?;
+        let reference_to_parent_dir = reader.read_le::<u64>()?;
+        let datetime_file_creation = reader.read::<NtfsDatetime>()?;
+        let datetime_file_modification = reader.read::<NtfsDatetime>()?;
+        let datetime_mft_modification = reader.read::<NtfsDatetime>()?;
+        let datetime_file_reading = reader.read::<NtfsDatetime>()?;
         let file_size_allocated_on_disk = reader.read_le::<u64>()?;
         let real_file_size = reader.read_le::<u64>()?;
         let file_permission_flags = reader.read_le::<u32>()?;
@@ -547,11 +542,11 @@ impl Readable for FileName {
         // 6 Bytes of padding
         let _ = reader.read_byte_array::<6>()?;
         Ok(Self {
-            reference_to_parent_dir: 0,
-            datetime_file_creation: NtfsDatetime::from(0),
-            datetime_file_modification: NtfsDatetime::from(0),
-            datetime_mft_modification: NtfsDatetime::from(0),
-            datetime_file_reading: NtfsDatetime::from(0),
+            reference_to_parent_dir,
+            datetime_file_creation,
+            datetime_file_modification,
+            datetime_mft_modification,
+            datetime_file_reading,
             file_size_allocated_on_disk,
             real_file_size,
             file_permission_flags,
@@ -647,15 +642,21 @@ fn parse_mft_file_record(
                 starting_offset + mft_file_descriptor.offset_first_attribute as u64;
             let mut attribute_offset: u64 = 0;
 
+            let mut duplicate_attribute_map: Vec<u32> = Vec::new();
             while stream.peek_le::<u32>()? != u32::MAX {
                 let offset = attribute_start_offset + attribute_offset;
                 stream = ByteStream::from_byte_offset(path, mft_record_size, offset)?;
-                // println!("Before read: {:#?}", stream.get_byte_offset());
                 let attribute_header = stream.read::<AttributeHeader>()?;
                 let length = attribute_header.attribute_length();
                 // FIXME: account for update sequences: https://stackoverflow.com/questions/55126151/ntfs-mft-datarun
                 // Currently ignoring $DATA attributes that are not the $MFT itself.
-                // println!("Reading attribute type: {:02x} at offset: {} with length: {}", attribute_header.attribute_type(), offset, length);
+
+                // FIXME: Currently ignoring duplicate attributes.
+                // For file records with hard links, there can be more than one $FILE_NAME attribute 
+                if duplicate_attribute_map.iter().find(|&attr_type| *attr_type == attribute_header.attribute_type()).is_some() {
+                    break;
+                }
+
                 match attribute_header.attribute_type() {
                     0x10 => {
                         let start_stdinfo = stream.get_byte_offset()?;
@@ -665,6 +666,7 @@ fn parse_mft_file_record(
                             attribute_header,
                             MftAttribute::StandardInformation(standard_information),
                         ));
+                        duplicate_attribute_map.push(0x10);
                     }
                     0x30 => {
                         let start_filename = stream.get_byte_offset()?;
@@ -675,6 +677,7 @@ fn parse_mft_file_record(
                             attribute_header,
                             MftAttribute::FileName(file_name),
                         ));
+                        duplicate_attribute_map.push(0x30);
                     }
                     0x80 => {
                         if ignore_data_attribute {
@@ -693,7 +696,6 @@ fn parse_mft_file_record(
                     }
                 }
                 attribute_offset += length as u64;
-                println!("Ending offset: {}", attribute_offset);
             }
         }
         b"BAAD" => {
@@ -753,6 +755,7 @@ fn parse_mft(path: &Path, mft_lba: u64, mft_record_size: u32) -> io::Result<Vec<
 }
 
 pub fn display_mft(records: Vec<MftFileRecord>) {
+    println!("# of Records: {}", records.len());
     for mut record in records {
         record
             .attributes
