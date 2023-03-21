@@ -5,7 +5,7 @@ use std::{
     path::Path,
 };
 
-const BOOTSTRAPER_LENGTH: usize = 446;
+const BOOTSTRAPER_LENGTH: u64 = 446;
 const CHS_SECTOR_BIT_SIZE: u8 = 6;
 const FIRST_TWO_BIT_MASK: u16 = 0b11000000;
 pub const BOOT_SIGNATURE: [u8; 2] = [0x55, 0xAA];
@@ -31,8 +31,8 @@ impl Readable for MbrPartitionTableEntry {
             starting_chs: reader.read_byte_array::<3>()?,
             partition_type: reader.read()?,
             ending_chs: reader.read_byte_array::<3>()?,
-            lba_start: reader.read()?,
-            num_sectors: reader.read()?,
+            lba_start: reader.read_le()?,
+            num_sectors: reader.read_le()?,
         })
     }
 }
@@ -219,9 +219,10 @@ fn parse_sector(
     first_ebr_lba: u64,
 ) -> io::Result<()> {
     // , Some(BOOTSTRAPER_LENGTH as usize), image_offset_sector
-    let mut stream = ByteStream::new(path)?;
-    let _ = stream
-        .jump_to_byte((image_offset_sector * SECTOR_SIZE as u64) + BOOTSTRAPER_LENGTH as u64)?;
+    let mut stream = ByteStream::new(path, SECTOR_SIZE, image_offset_sector)?;
+    stream.skip_bytes(BOOTSTRAPER_LENGTH);
+    // let _ = stream
+    //     .jump_to_byte((image_offset_sector * SECTOR_SIZE as u64) + BOOTSTRAPER_LENGTH as u64)?;
 
     // Boot record can only have at max 4 entries.
     for _ in 0..4 {

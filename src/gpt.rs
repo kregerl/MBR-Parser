@@ -71,7 +71,8 @@ impl Readable for Guid {
     where
         Self: Sized,
     {
-        Ok(Guid::new(reader.read_byte_array::<16>()?))
+        let x = reader.read_byte_array::<16>()?;
+        Ok(Guid::new(x))
     }
 }
 
@@ -124,18 +125,18 @@ impl Readable for GptHeader {
                 .trim()
                 .into(),
             revision: revision_buffer,
-            header_size: reader.read()?,
-            crc32: reader.read()?,
-            reserved: reader.read()?,
-            current_lba: reader.read()?,
-            backup_lba: reader.read()?,
-            first_usable_lba: reader.read()?,
-            last_usable_lba: reader.read()?,
+            header_size: reader.read_le()?,
+            crc32: reader.read_le()?,
+            reserved: reader.read_le()?,
+            current_lba: reader.read_le()?,
+            backup_lba: reader.read_le()?,
+            first_usable_lba: reader.read_le()?,
+            last_usable_lba: reader.read_le()?,
             disk_guid: reader.read::<Guid>()?,
-            starting_lba_of_partition_entries: reader.read()?,
-            number_partition_entries: reader.read()?,
-            size_single_partition_entry: reader.read()?,
-            crc32_partition_entries: reader.read()?,
+            starting_lba_of_partition_entries: reader.read_le()?,
+            number_partition_entries: reader.read_le()?,
+            size_single_partition_entry: reader.read_le()?,
+            crc32_partition_entries: reader.read_le()?,
         })
     }
 }
@@ -157,11 +158,10 @@ impl Readable for GptPartitionTableEntry {
     {
         let partition_type_guid = reader.read::<Guid>()?;
         let unique_partition_guid = reader.read::<Guid>()?;
-        let starting_lba = reader.read()?;
-        let ending_lba = reader.read()?;
+        let starting_lba = reader.read_le()?;
+        let ending_lba = reader.read_le()?;
         let attribute_flag_buffer = reader.read_byte_array::<8>()?;
         let partition_name_buffer = reader.read_byte_array::<72>()?;
-
         Ok(Self {
             partition_type_guid,
             unique_partition_guid,
@@ -214,8 +214,7 @@ impl Display for GptPartitionTableEntry {
 }
 
 fn is_valid_header_crc32(path: &Path, header_size: u32, crc32: u32) -> io::Result<bool> {
-    let mut stream = ByteStream::new(path)?;
-    stream.jump_to_sector(1)?;
+    let mut stream = ByteStream::new(path, SECTOR_SIZE, 1)?;
     let mut header_bytes = stream.read_raw(header_size as usize)?;
 
     // CRC32 of header (offset +0 to +0x5b) in little endian, with this field zeroed during calculation
@@ -241,8 +240,8 @@ fn calculate_crc32(bytes: Vec<u8>) -> u32 {
 }
 
 pub fn parse_gpt(path: &Path) -> io::Result<Vec<GptPartitionTableEntry>> {
-    let mut stream = ByteStream::new(path)?;
-    stream.jump_to_sector(1)?;
+    let mut stream = ByteStream::new(path, SECTOR_SIZE, 1)?;
+    // stream.jump_to_sector(1)?;
     let header = stream.read::<GptHeader>()?;
 
     if header.efi_part == "EFI PART" {
@@ -258,7 +257,7 @@ pub fn parse_gpt(path: &Path) -> io::Result<Vec<GptPartitionTableEntry>> {
     let number_of_sectors =
         (header.number_partition_entries * header.size_single_partition_entry) / SECTOR_SIZE as u32;
 
-    let buffer = stream.read_raw_sectors(
+    let buffer = stream.read_raw_sectors_from_file(
         header.starting_lba_of_partition_entries as usize,
         number_of_sectors as usize,
     )?;
@@ -270,17 +269,16 @@ pub fn parse_gpt(path: &Path) -> io::Result<Vec<GptPartitionTableEntry>> {
     let mut partition_table = Vec::new();
     'outer: for index in 0..number_of_sectors {
         let sector_lba = header.starting_lba_of_partition_entries + index as u64;
-        stream.jump_to_sector(sector_lba)?;
+        let mut table_stream = ByteStream::new(&path, SECTOR_SIZE * 32, sector_lba)?;
 
         loop {
-            let partition_table_entry = stream.read::<GptPartitionTableEntry>()?;
+            let partition_table_entry = table_stream.read::<GptPartitionTableEntry>()?;
             if partition_table_entry.is_empty() {
                 break 'outer;
             }
             partition_table.push(partition_table_entry);
         }
     }
-
     Ok(partition_table)
 }
 

@@ -4,7 +4,7 @@ use crate::{
     Timestomp,
 };
 use byteorder::{LittleEndian, WriteBytesExt};
-use chrono::{DateTime, Local};
+use chrono::{offset, DateTime, Local};
 use core::time;
 use csv::Writer;
 use prettytable::{row, Table};
@@ -54,7 +54,7 @@ impl Readable for NtfsPartitionBootRecord {
         let jump_instruction = reader.read_byte_array::<3>()?;
         // Interpreted as a string
         let oem_id = reader.read_byte_array::<8>()?;
-        let bytes_per_sector = reader.read::<u16>()?;
+        let bytes_per_sector = reader.read_le::<u16>()?;
         let sectors_per_cluster = reader.read::<u8>()?;
         error_bytes.append(&mut reader.read_byte_array::<7>()?.to_vec());
         let device_type = reader.read::<u8>()?;
@@ -62,9 +62,9 @@ impl Readable for NtfsPartitionBootRecord {
         unused_space.append(&mut reader.read_byte_array::<8>()?.to_vec());
         error_bytes.append(&mut reader.read_byte_array::<4>()?.to_vec());
         unused_space.append(&mut reader.read_byte_array::<4>()?.to_vec());
-        let number_of_sectors_in_volume = reader.read::<u64>()?;
-        let mft_lcn = reader.read::<u64>()?;
-        let backup_mft_lcn = reader.read::<u64>()?;
+        let number_of_sectors_in_volume = reader.read_le::<u64>()?;
+        let mft_lcn = reader.read_le::<u64>()?;
+        let backup_mft_lcn = reader.read_le::<u64>()?;
         let mft_size = reader.read::<i8>()?;
         unused_space.append(&mut reader.read_byte_array::<3>()?.to_vec());
         let number_of_clusters_per_index_buffer = reader.read::<u8>()?;
@@ -96,8 +96,8 @@ impl NtfsPartitionBootRecord {
 }
 
 pub fn parse_pbr(path: &Path, starting_lba: u64) -> io::Result<Vec<MftFileRecord>> {
-    let mut stream = ByteStream::new(path)?;
-    stream.jump_to_sector(starting_lba)?;
+    let mut stream = ByteStream::new(path, SECTOR_SIZE, starting_lba)?;
+    // stream.jump_to_sector(starting_lba)?;
     let partition_boot_record = stream.read::<NtfsPartitionBootRecord>()?;
     match partition_boot_record.oem_id_str().as_deref() {
         Ok("NTFS") => {
@@ -123,7 +123,7 @@ pub fn parse_pbr(path: &Path, starting_lba: u64) -> io::Result<Vec<MftFileRecord
             } else {
                 (partition_boot_record.mft_size as usize * 8 * SECTOR_SIZE) as u32
             };
-            parse_mft(&mut stream, mft_lba, mft_size)
+            parse_mft(path, mft_lba, mft_size)
         }
         Err(e) => panic!("Error parsing OEM ID: {}", e),
         _ => panic!("Cannot parse $MFT of a non-NTFS partition"),
@@ -157,20 +157,20 @@ impl Readable for MftFileDescriptor {
     {
         Ok(Self {
             signature: reader.read_byte_array::<4>()?,
-            offest_of_update_seq: reader.read::<u16>()?,
-            size_of_update_seq: reader.read::<u16>()?,
-            log_file_seq_nr: reader.read::<u64>()?,
+            offest_of_update_seq: reader.read_le::<u16>()?,
+            size_of_update_seq: reader.read_le::<u16>()?,
+            log_file_seq_nr: reader.read_le::<u64>()?,
             use_count: reader.read::<u8>()?,
             deletion_count: reader.read::<u8>()?,
-            hard_link_count: reader.read::<u16>()?,
-            offset_first_attribute: reader.read::<u16>()?,
-            flags: reader.read::<u16>()?,
-            file_size_on_disk: reader.read::<u32>()?,
-            space_allocated: reader.read::<u32>()?,
-            base_register: reader.read::<u64>()?,
-            next_attribute_id: reader.read::<u16>()?,
-            update_sequence_number: reader.read::<u16>()?,
-            update_sequence: reader.read::<u32>()?,
+            hard_link_count: reader.read_le::<u16>()?,
+            offset_first_attribute: reader.read_le::<u16>()?,
+            flags: reader.read_le::<u16>()?,
+            file_size_on_disk: reader.read_le::<u32>()?,
+            space_allocated: reader.read_le::<u32>()?,
+            base_register: reader.read_le::<u64>()?,
+            next_attribute_id: reader.read_le::<u16>()?,
+            update_sequence_number: reader.read_le::<u16>()?,
+            update_sequence: reader.read_le::<u32>()?,
         })
     }
 }
@@ -197,13 +197,13 @@ impl Readable for CommonAttributeHeader {
         Self: Sized,
     {
         Ok(Self {
-            attribute_type: reader.read::<u32>()?,
-            length: reader.read::<u32>()?,
+            attribute_type: reader.read_le::<u32>()?,
+            length: reader.read_le::<u32>()?,
             non_resident_flag: reader.read::<u8>()?,
             name_length: reader.read::<u8>()?,
-            name_offset: reader.read::<u16>()?,
+            name_offset: reader.read_le::<u16>()?,
             flags: reader.read_byte_array::<2>()?,
-            attribute_id: reader.read::<u16>()?,
+            attribute_id: reader.read_le::<u16>()?,
         })
     }
 }
@@ -222,8 +222,8 @@ impl Readable for ResidentAttributeHeader {
         Self: Sized,
     {
         Ok(Self {
-            attribute_length: reader.read::<u32>()?,
-            attribute_offset: reader.read::<u16>()?,
+            attribute_length: reader.read_le::<u32>()?,
+            attribute_offset: reader.read_le::<u16>()?,
             indexed_flag: reader.read::<u8>()?,
         })
     }
@@ -246,15 +246,15 @@ impl Readable for NonResidentAttributeHeader {
     where
         Self: Sized,
     {
-        let starting_vcn = reader.read::<u64>()?;
-        let ending_vcn = reader.read::<u64>()?;
-        let data_runs_offset = reader.read::<u16>()?;
-        let compression_unit_size = reader.read::<u16>()?;
+        let starting_vcn = reader.read_le::<u64>()?;
+        let ending_vcn = reader.read_le::<u64>()?;
+        let data_runs_offset = reader.read_le::<u16>()?;
+        let compression_unit_size = reader.read_le::<u16>()?;
         // Discard 4 bytes of 0 padding
         let _ = reader.read_byte_array::<4>()?;
-        let allocated_size_of_attribute = reader.read::<u64>()?;
-        let real_size_of_attribute = reader.read::<u64>()?;
-        let initialized_data_size = reader.read::<u64>()?;
+        let allocated_size_of_attribute = reader.read_le::<u64>()?;
+        let real_size_of_attribute = reader.read_le::<u64>()?;
+        let initialized_data_size = reader.read_le::<u64>()?;
         Ok(Self {
             starting_vcn,
             ending_vcn,
@@ -468,7 +468,7 @@ impl Readable for NtfsDatetime {
     where
         Self: Sized,
     {
-        let ole2_timestamp = reader.read::<u64>()?;
+        let ole2_timestamp = reader.read_le::<u64>()?;
         let timestamp_unix_epoch = (ole2_timestamp - 116444736000000000) / 10000000;
         let datetime =
             DateTime::<Local>::from(UNIX_EPOCH + Duration::from_secs(timestamp_unix_epoch));
@@ -497,9 +497,9 @@ impl Readable for StandardInformation {
             datetime_file_modification: reader.read::<NtfsDatetime>()?,
             datetime_mft_modification: reader.read::<NtfsDatetime>()?,
             datetime_file_reading: reader.read::<NtfsDatetime>()?,
-            file_permission_flags: reader.read::<u32>()?,
-            maximum_number_versions: reader.read::<u32>()?,
-            version_number: reader.read::<u64>()?,
+            file_permission_flags: reader.read_le::<u32>()?,
+            maximum_number_versions: reader.read_le::<u32>()?,
+            version_number: reader.read_le::<u64>()?,
         })
     }
 }
@@ -525,16 +525,16 @@ impl Readable for FileName {
     fn read(reader: &mut ByteStream) -> io::Result<Self>
     where
         Self: Sized,
-    {
-        let reference_to_parent_dir = reader.read::<u64>()?;
+    {   
+        let reference_to_parent_dir = reader.read_le::<u64>()?;
         let datetime_file_creation = reader.read::<NtfsDatetime>()?;
         let datetime_file_modification = reader.read::<NtfsDatetime>()?;
         let datetime_mft_modification = reader.read::<NtfsDatetime>()?;
         let datetime_file_reading = reader.read::<NtfsDatetime>()?;
-        let file_size_allocated_on_disk = reader.read::<u64>()?;
-        let real_file_size = reader.read::<u64>()?;
-        let file_permission_flags = reader.read::<u32>()?;
-        let extended_attributes_and_reparse = reader.read::<u32>()?;
+        let file_size_allocated_on_disk = reader.read_le::<u64>()?;
+        let real_file_size = reader.read_le::<u64>()?;
+        let file_permission_flags = reader.read_le::<u32>()?;
+        let extended_attributes_and_reparse = reader.read_le::<u32>()?;
         let name_size = reader.read::<u8>()?;
         let namespace = reader.read::<u8>()?;
         let name_bytes = reader.read_raw(name_size as usize * 2)?;
@@ -629,26 +629,35 @@ impl MftFileRecord {
 }
 
 fn parse_mft_file_record(
-    stream: &mut ByteStream,
-    offset: u64,
+    path: &Path,
+    starting_offset: u64,
+    mft_record_size: usize,
     ignore_data_attribute: bool,
 ) -> io::Result<Option<MftFileRecord>> {
-    stream.jump_to_byte(offset)?;
+    let mut stream = ByteStream::from_byte_offset(path, mft_record_size, starting_offset)?;
     let mft_file_descriptor = stream.read::<MftFileDescriptor>()?;
     let mut attributes: Vec<(u64, AttributeHeader, MftAttribute)> = Vec::new();
     match &mft_file_descriptor.signature {
         b"FILE" => {
-            let attribute_start_offset = offset + mft_file_descriptor.offset_first_attribute as u64;
+            let attribute_start_offset =
+                starting_offset + mft_file_descriptor.offset_first_attribute as u64;
             let mut attribute_offset: u64 = 0;
 
-            while stream.peek::<u32>()? != u32::MAX {
+            let mut duplicate_attribute_map: Vec<u32> = Vec::new();
+            while stream.peek_le::<u32>()? != u32::MAX {
                 let offset = attribute_start_offset + attribute_offset;
-                stream.jump_to_byte(offset)?;
+                stream = ByteStream::from_byte_offset(path, mft_record_size, offset)?;
                 let attribute_header = stream.read::<AttributeHeader>()?;
                 let length = attribute_header.attribute_length();
-
                 // FIXME: account for update sequences: https://stackoverflow.com/questions/55126151/ntfs-mft-datarun
                 // Currently ignoring $DATA attributes that are not the $MFT itself.
+
+                // FIXME: Currently ignoring duplicate attributes.
+                // For file records with hard links, there can be more than one $FILE_NAME attribute 
+                if duplicate_attribute_map.iter().find(|&attr_type| *attr_type == attribute_header.attribute_type()).is_some() {
+                    break;
+                }
+
                 match attribute_header.attribute_type() {
                     0x10 => {
                         let start_stdinfo = stream.get_byte_offset()?;
@@ -658,15 +667,18 @@ fn parse_mft_file_record(
                             attribute_header,
                             MftAttribute::StandardInformation(standard_information),
                         ));
+                        duplicate_attribute_map.push(0x10);
                     }
                     0x30 => {
                         let start_filename = stream.get_byte_offset()?;
+                        // println!("start_filename: {}", start_filename);
                         let file_name = stream.read::<FileName>()?;
                         attributes.push((
                             start_filename,
                             attribute_header,
                             MftAttribute::FileName(file_name),
                         ));
+                        duplicate_attribute_map.push(0x30);
                     }
                     0x80 => {
                         if ignore_data_attribute {
@@ -702,15 +714,12 @@ fn parse_mft_file_record(
 }
 
 // https://sabercomlogica.com/en/ntfs-resident-and-no-named-attributes/
-fn parse_mft(
-    stream: &mut ByteStream,
-    mft_lba: u64,
-    mft_record_size: u32,
-) -> io::Result<Vec<MftFileRecord>> {
+fn parse_mft(path: &Path, mft_lba: u64, mft_record_size: u32) -> io::Result<Vec<MftFileRecord>> {
     let starting_offset = mft_lba * SECTOR_SIZE as u64;
     let mut offset = starting_offset;
+
     // The record in the MFT that describes the MFT
-    let mft = parse_mft_file_record(stream, starting_offset, false)?
+    let mft = parse_mft_file_record(path, starting_offset, mft_record_size as usize, false)?
         .expect("Expected MFT file record to exist.");
     offset += 1024;
     let mft_data_attribute = mft
@@ -730,7 +739,7 @@ fn parse_mft(
                 .file_allocation_size()
                 .expect("No file allocation size.");
             while offset < starting_offset + allocation_size {
-                match parse_mft_file_record(stream, offset, true)? {
+                match parse_mft_file_record(path, offset, mft_record_size as usize, true)? {
                     Some(record) => {
                         records.push(record);
                     }
@@ -813,6 +822,7 @@ pub fn mft_to_csv(records: Vec<MftFileRecord>, file_name: &str) -> Result<(), cs
 }
 
 pub fn display_mft(records: Vec<MftFileRecord>) {
+    println!("# of Records: {}", records.len());
     for mut record in records {
         record
             .attributes
@@ -957,4 +967,11 @@ fn test_stomp() {
     let timestamp_unix_epoch = (num - 116444736000000000) / 10000000;
     let datetime = DateTime::<Local>::from(UNIX_EPOCH + Duration::from_secs(timestamp_unix_epoch));
     println!("DateTime: {:#?}", datetime);
+}
+
+
+#[test]
+fn test_erroring_file_record() {
+    let record = parse_mft_file_record(Path::new("\\\\.\\PhysicalDrive0"), 20142478336, 1024, true).unwrap();
+    println!("Record: {:#?}", record);
 }
