@@ -6,6 +6,7 @@ use crate::{
 use byteorder::{LittleEndian, WriteBytesExt};
 use chrono::{DateTime, Local};
 use core::time;
+use csv::Writer;
 use prettytable::{row, Table};
 use std::{
     collections::HashMap,
@@ -743,6 +744,72 @@ fn parse_mft(
         }
     }
     Ok(records)
+}
+
+// There are more than 8 possible timestamps in MFT Records 
+// https://dfir.ru/2021/01/10/standard_information-vs-file_name/
+pub fn mft_to_csv(records: Vec<MftFileRecord>, file_name: &str) -> Result<(), csv::Error> {
+    let mut writer = Writer::from_path(Path::new(file_name))?;
+    let header = [
+        "File Name",
+        "File Size",
+        "File Size on Disk",
+        "$FN Modified",
+        "$FN MFT Modified",
+        "$FN Created",
+        "$FN Read",
+        "$SI Modified",
+        "$SI MFT Modified",
+        "$SI Created",
+        "$SI Read",
+    ];
+    writer.write_record(header)?;
+
+    for mut record in records {
+        record
+            .attributes
+            .sort_by(|(_, header1, _), (_, header2, _)| {
+                header1.attribute_type().cmp(&header2.attribute_type())
+            });
+        record.attributes.reverse();
+        let mut tmp: [String; 11] = [
+            "No Name".into(),
+            "Unknown".into(),
+            "Unknown".into(),
+            "Unknown".into(),
+            "Unknown".into(),
+            "Unknown".into(),
+            "Unknown".into(),
+            "Unknown".into(),
+            "Unknown".into(),
+            "Unknown".into(),
+            "Unknown".into(),
+        ];
+        for (_attribute_offset, _, attribute) in record.attributes {
+            match attribute {
+                MftAttribute::StandardInformation(stdinfo) => {
+                    tmp[7] = stdinfo.datetime_file_modification.datetime.to_string();
+                    tmp[8] = stdinfo.datetime_mft_modification.datetime.to_string();
+                    tmp[9] = stdinfo.datetime_file_creation.datetime.to_string();
+                    tmp[10] = stdinfo.datetime_file_reading.datetime.to_string();
+                },
+                MftAttribute::FileName(filename) => {
+                    tmp[0] = filename.name;
+                    tmp[1] = format!("{}", filename.real_file_size);
+                    tmp[2] = format!("{}", filename.file_size_allocated_on_disk);
+                    tmp[3] = filename.datetime_file_modification.datetime.to_string();
+                    tmp[4] = filename.datetime_mft_modification.datetime.to_string();
+                    tmp[5] = filename.datetime_file_creation.datetime.to_string();
+                    tmp[6] = filename.datetime_file_reading.datetime.to_string();
+                },
+                MftAttribute::Data(_) => {},
+            }
+        }
+        writer.write_record(tmp)?;
+    }
+
+    writer.flush()?;
+    Ok(())
 }
 
 pub fn display_mft(records: Vec<MftFileRecord>) {

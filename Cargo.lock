@@ -387,11 +387,12 @@ checksum = "9b7820b9daea5457c9f21c69448905d723fbd21136ccf521748f23fd49e723ee"
 
 [[package]]
 name = "parttable"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "byteorder",
  "chrono",
  "clap",
+ "csv",
  "prettytable-rs",
 ]
 
