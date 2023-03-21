@@ -1,5 +1,5 @@
 # Parttable
-Small command line utility for printing the partition tables. Currently supported partition tables: 
+Small cross-platform command line utility for printing the partition tables. Currently supported partition tables: 
 - Guid Partition Table (GPT)
 - Master Boot Record (MBR)
 - Apple Partition Map (APM)
